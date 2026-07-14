@@ -43,6 +43,7 @@ struct SiriContentDetailView: View {
             }
             .navigationTitle("Found Content")
             .navigationBarTitleDisplayMode(.inline)
+            .siriOnscreenContent(GlassesContentEntity(link: link))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

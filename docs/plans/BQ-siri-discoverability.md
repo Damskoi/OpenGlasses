@@ -170,14 +170,29 @@ delete operations; `SpotlightIndexService` (edge) applies them via `CSSearchable
 re-plans on store change notifications and app-foreground, full purge on toggle-off/HIPAA.
 Tests cover the planner exhaustively; the edge is a dumb executor.
 
-## P3 / PR3 — Onscreen content + assistant schema (device-gated) 🟡
+## P3 / PR3 — Onscreen content + camera App Schema (code shipped, device-gated) 🟡
 
-- Donate `NSUserActivity` with the entity identifier from `ChatThreadView`, note detail, and
-  meeting-summary views ("Siri, what's on screen").
-- Adopt the camera assistant schema (`startCapture`) on the capture intents so Siri's
-  pre-trained camera phrasing applies to the glasses camera.
-- Both are small but only meaningfully verifiable on device with Apple Intelligence enabled —
-  deferred to a hardware session, same rhythm as BJ/BO smoke gates.
+- `siriOnscreenContent` modifier: `NSUserActivity` + `appEntityIdentifier` donation from
+  `ChatThreadView` (thread title/summary only) and `SiriContentDetailView` — "Siri,
+  summarize this". Dedicated note/summary detail views don't exist (those stores render
+  through Settings editors), so the Spotlight-result detail sheet is the second surface.
+- Camera schema via the current **`@AppIntent(schema: .camera.startCapture/.stopCapture)`**
+  macros (`@AssistantIntent` is deprecated in the iOS 27 SDK). Shape (metadata-processor
+  verified): `startCapture` requires `captureMode`/`timerDuration`/`device`, each an
+  `@AppEnum(schema: .camera.*)` — v1 honours mode (photo→silent capture, video→recorder),
+  timer/device accepted but immediate/glasses-only.
+- On-device Apple Intelligence verification (phrases, onscreen "this" resolution) deferred
+  to a hardware session, same rhythm as BJ/BO smoke gates.
+
+**Riders (from WWDC26 App Schemas guidance):**
+- Per-item `.appEntityIdentifier()` annotations in list views (chat messages, script list)
+  — the multi-item onscreen story; `NSUserActivity` covers only the single primary item.
+- `IntentValueRepresentation` on `GlassesContentEntity.transferRepresentation` so other
+  apps' intents can consume entities (current: plain-text proxy only).
+- Adopt the `AppIntentsTesting` framework for isolated intent tests (would let the curated
+  intents be exercised headless instead of guard-level-only).
+- Consider `@AppEntity(schema:)` domain adoption if a content domain lands that fits notes
+  (`journal`?) — generic entity today.
 
 ## Gotchas (project-verified)
 
