@@ -1,6 +1,15 @@
 # Plan BQ — Siri & Apple Intelligence Discoverability
 
-**Status: 🚧 P1 in review; P2/P3 planned.**
+**Status: 🚧 P1 shipped ([#231](https://github.com/straff2002/OpenGlasses/pull/231)); P2 in review; P3 planned.**
+
+*P2 as-built notes:* one generic `GlassesContentEntity` (not per-type entities — the
+metadata surface stayed small and the processor accepted it); the `OpenIntent` presents a
+generic read-only detail sheet (`SiriContentDetailView` via `AppState.pendingSiriContent`)
+rather than per-owning-view navigation — full owning-view deep-links deferred to a rider.
+Meeting summaries are filtered from the shared `saved_notes` key by title prefix as
+planned (no store migration). Conversations donate title + auto-summary only, and only
+while the store is unlocked. Field sessions: per-vault opt-in, metadata-only
+(asset/date/outcome/vault), completed sessions only.
 
 Make OpenGlasses' actions *and content* discoverable to Siri, Spotlight, and Apple
 Intelligence — and put the exposure surface under user control: a Settings screen where the
