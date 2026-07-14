@@ -292,6 +292,8 @@ struct OpenGlassesApp: App {
                 // Refresh the Siri Shortcuts catalog — the user may have added shortcuts
                 // while away — so the agent's run_shortcut menu stays current (Plan Z).
                 Task { await ShortcutsCatalog.shared.refresh() }
+                // Plan BQ P2: re-donate user-exposed content to Spotlight (diff-only).
+                SpotlightIndexService.shared.requestRefresh()
                 if appState.conversationStore.isLocked {
                     Task { await appState.conversationStore.unlock() }
                 }
@@ -540,6 +542,9 @@ class AppState: ObservableObject, AppStateProtocol {
 
     /// Pending item to show in the share sheet
     @Published var pendingShareItem: ShareItem?
+
+    /// Spotlight/Siri content result awaiting presentation (Plan BQ P2 OpenIntent).
+    @Published var pendingSiriContent: SiriContentLink?
 
     // OpenClaw + Realtime sessions
     let openClawBridge = OpenClawBridge()

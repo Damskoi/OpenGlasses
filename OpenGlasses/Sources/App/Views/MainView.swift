@@ -66,5 +66,8 @@ struct MainView: View {
                 onCancel: { appState.phoneCameraRequest = nil }
             )
         }
+        .sheet(item: $appState.pendingSiriContent) { link in
+            SiriContentDetailView(link: link)
+        }
     }
 }

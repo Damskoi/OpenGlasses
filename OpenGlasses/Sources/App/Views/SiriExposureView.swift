@@ -8,6 +8,7 @@ import SwiftUI
 /// Siri's phrase predictions with `updateAppShortcutParameters()`.
 struct SiriExposureView: View {
     @State private var config = Config.siriExposure
+    @State private var contentConfig = Config.siriContentIndex
     @State private var editingAction: SiriActionDefinition?
     @State private var showingEditor = false
 
@@ -81,6 +82,8 @@ struct SiriExposureView: View {
             } footer: {
                 Text("Built-in actions stay visible in the Shortcuts app even when off — turning one off makes Siri refuse it and hides it from the action list.")
             }
+
+            contentIndexSections
         }
         .navigationTitle("Siri & Search")
         .sheet(isPresented: $showingEditor) {
@@ -93,6 +96,91 @@ struct SiriExposureView: View {
                 save()
             }
         }
+    }
+
+    // MARK: Content in Search (Plan BQ P2)
+
+    @ViewBuilder
+    private var contentIndexSections: some View {
+        if Config.hipaaMode {
+            Section("Content in Search") {
+                Text("Spotlight donation is disabled while Medical Compliance Mode is on.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Section {
+                ForEach(SiriContentType.allCases.filter { $0 != .fieldSession }, id: \.rawValue) { type in
+                    Toggle(type.displayLabel, isOn: contentTypeBinding(type))
+                }
+            } header: {
+                Text("Content in Search")
+            } footer: {
+                Text("Exposed content appears in Spotlight and Siri search. Conversations donate titles only. Health data, recognized people, and audio are never indexed.")
+            }
+
+            let vaults = fieldSessionVaultIds
+            if !vaults.isEmpty {
+                Section {
+                    ForEach(vaults, id: \.self) { vaultId in
+                        Toggle(vaultId, isOn: fieldSessionVaultBinding(vaultId))
+                    }
+                } header: {
+                    Text("Field Sessions in Search")
+                } footer: {
+                    Text("Per-vault. Only session metadata (asset, date, outcome) is donated — never the audit log or captured values.")
+                }
+            }
+        }
+    }
+
+    /// Vaults with any completed session — the candidates for per-vault opt-in.
+    private var fieldSessionVaultIds: [String] {
+        Array(Set(FieldSessionService.shared.history
+            .filter { $0.endedAt != nil }
+            .map(\.vaultId)))
+            .sorted()
+    }
+
+    private func contentTypeBinding(_ type: SiriContentType) -> Binding<Bool> {
+        Binding(
+            get: { contentConfig.isEnabled(type) },
+            set: { enabled in
+                if type.defaultEnabled {
+                    if enabled {
+                        contentConfig.disabledTypes.remove(type.rawValue)
+                    } else {
+                        contentConfig.disabledTypes.insert(type.rawValue)
+                    }
+                } else {
+                    if enabled {
+                        contentConfig.optInTypes.insert(type.rawValue)
+                    } else {
+                        contentConfig.optInTypes.remove(type.rawValue)
+                    }
+                }
+                saveContentConfig()
+            }
+        )
+    }
+
+    private func fieldSessionVaultBinding(_ vaultId: String) -> Binding<Bool> {
+        Binding(
+            get: { contentConfig.fieldSessionVaults.contains(vaultId) },
+            set: { enabled in
+                if enabled {
+                    contentConfig.fieldSessionVaults.insert(vaultId)
+                } else {
+                    contentConfig.fieldSessionVaults.remove(vaultId)
+                }
+                saveContentConfig()
+            }
+        )
+    }
+
+    private func saveContentConfig() {
+        Config.setSiriContentIndex(contentConfig)
+        SpotlightIndexService.shared.requestRefresh()
     }
 
     // MARK: State plumbing

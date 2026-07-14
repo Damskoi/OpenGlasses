@@ -49,6 +49,11 @@ class HIPAAComplianceService: ObservableObject {
         Config.hipaaMode = enabled
         log(action: enabled ? "COMPLIANCE_ENABLED" : "COMPLIANCE_DISABLED",
             detail: enabled ? "Medical compliance mode enabled" : "Medical compliance mode disabled")
+        if enabled {
+            // Plan BQ P2: compliance mode hard-disables Spotlight donation — purge
+            // everything previously donated. (Refreshes while enabled donate nothing.)
+            Task { @MainActor in await SpotlightIndexService.shared.purgeAll() }
+        }
         onModeChanged?()
     }
 

@@ -1296,6 +1296,22 @@ struct Config {
         }
     }
 
+    /// Which content types the user donates to Spotlight (Plan BQ P2). Separate key from
+    /// the action config so neither needs migrating when the other grows.
+    static var siriContentIndex: SiriContentIndexConfig {
+        guard let data = UserDefaults.standard.data(forKey: "siriContentIndexConfig"),
+              let config = try? JSONDecoder().decode(SiriContentIndexConfig.self, from: data) else {
+            return SiriContentIndexConfig()
+        }
+        return config
+    }
+
+    static func setSiriContentIndex(_ config: SiriContentIndexConfig) {
+        if let data = try? JSONEncoder().encode(config) {
+            UserDefaults.standard.set(data, forKey: "siriContentIndexConfig")
+        }
+    }
+
     // MARK: - ElevenLabs TTS
 
     /// ElevenLabs API key for natural TTS voices. Stored in the Keychain (see `KeychainService`).
