@@ -58,6 +58,24 @@ Beyond the pre-made phrases above, **Capture Glasses Photo** (a silent capture s
 
 The first time, iOS surfaces these in the **Shortcuts** app and the Siri phrase picker (you can rename the phrase to anything you like). A **persona name** can ride in the phrase ("ask Claude…") because it's a fixed, resolvable choice; the **question** can't (iOS only lets App Shortcut phrases embed fixed choices, not free-form text), so it's asked **two-step** — Siri prompts and awaits your spoken reply. Consecutive asks within a few minutes continue the **same conversation thread**, and Siri shows the answer in a result card. The intent runs in the background and speaks the result — no need to bring the app forward. If Siri ever says OpenGlasses isn't running, enable **Settings → Voice → Open App for Siri Questions** to have it launch the app first.
 
+#### Choose What Siri Can Run — and Add Your Own Actions
+
+**Settings → Siri & Search** is the control panel for the whole Siri surface:
+
+- **Built-in actions** — photo, recording, live modes, listening, **daily briefing**, **memory rewind** ("what did they just say?"), **teleprompter**, **meeting summary**, **save this location**, **broadcast** — each individually toggleable. Anything you turn off, Siri politely refuses.
+- **Your capabilities** — capture flows, procedures, playbooks, and custom tools you've authored appear automatically as candidates (off by default). Turn one on and **"Run *pump inspection* on OpenGlasses"** works by voice — no extra setup.
+- **Custom actions** — invent your own: a spoken name (plus synonyms) bound to a canned instruction for the assistant or a single tool call. "Run *morning rundown* on OpenGlasses."
+
+#### Your Content in Spotlight
+
+Notes, meeting summaries, saved locations, teleprompter scripts, playbooks, and study decks appear in **Spotlight and Siri search** — "the compressor job from Tuesday" finds the field session, and opening a result deep-links into the app. Privacy-tiered: **conversations** (titles only) and **Field Assist sessions** (metadata only, opted in per vault) are off until you enable them; health data, recognized people, and audio are **never indexed**; Medical Compliance Mode disables all donation and purges the index.
+
+#### Pre-Trained Siri Phrasing (App Schemas)
+
+OpenGlasses adopts Apple's **camera** and **assistant** App Intent schemas, so Apple-trained phrasing works with no custom shortcut: "take a photo", "start recording a video". Siri can also resolve **"this"** against the open chat thread — "summarize this" just works.
+
+The assistant schema additionally registers OpenGlasses for the **side-button voice-assistant slot** (replace Siri with OpenGlasses) — currently a **Japan-only** surface (iOS 26.2+, Apple Account region set to Japan, required by Japan's Mobile Software Competition Act; expected to reach more regions as regulation spreads). Everywhere else, the Action button route via **Settings → Action Button → Shortcut → "Ask OpenGlasses"** works today.
+
 ### On-Device Local LLM
 
 Run AI models entirely on your iPhone — no internet, no cloud, no API keys.
