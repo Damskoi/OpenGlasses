@@ -48,6 +48,7 @@ struct TakePhotoIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("take_photo")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -124,14 +125,20 @@ struct OpenGlassesShortcuts: AppShortcutsProvider {
             shortTitle: "Read Text",
             systemImageName: "text.viewfinder"
         )
+        // Plan BQ: the parameterized action shortcut — one phrase covers every action the
+        // user has exposed (built-in toggles, harvested capabilities, hand-made actions),
+        // because the AppEntity's query is runtime data. Took AnalyzeFood's slot under the
+        // 10-shortcut cap (the intent survives; food analysis stays reachable via this
+        // shortcut's catalog and the glasses loop). Call
+        // `OpenGlassesShortcuts.updateAppShortcutParameters()` after any catalog mutation.
         AppShortcut(
-            intent: AnalyzeFoodIntent(),
+            intent: RunGlassesActionIntent(),
             phrases: [
-                "Is this healthy \(.applicationName)",
-                "\(.applicationName) analyze food"
+                "Run \(\.$action) on \(.applicationName)",
+                "\(\.$action) with \(.applicationName)"
             ],
-            shortTitle: "Analyze Food",
-            systemImageName: "fork.knife"
+            shortTitle: "Run Action",
+            systemImageName: "sparkles"
         )
         AppShortcut(
             intent: DescribeEnvironmentIntent(),

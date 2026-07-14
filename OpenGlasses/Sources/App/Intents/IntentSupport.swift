@@ -22,6 +22,28 @@ enum IntentSupport {
         }
         throw IntentConnectionError.appNotRunning
     }
+
+    /// Plan BQ runtime guard: static intents can't be removed from the compiled metadata,
+    /// so a built-in the user turned off in Settings → Siri & Search refuses here instead.
+    /// (The Live Activity listening intents are deliberately unguarded — they're in-app
+    /// surface controls, not Siri exposure.)
+    @MainActor
+    static func requireEnabled(_ builtinActionId: String) throws {
+        guard !Config.siriExposure.disabledBuiltinActions.contains(builtinActionId) else {
+            throw SiriActionError.disabled
+        }
+    }
+
+    /// Execute one native tool, mapping failures to speakable text so Siri reads something
+    /// useful instead of a generic error.
+    @MainActor
+    static func runTool(_ name: String, args: [String: Any], appState: AppState) async -> String {
+        do {
+            return try await appState.nativeToolRegistry.executeTool(name: name, arguments: args)
+        } catch {
+            return "That action isn't available right now: \(error.localizedDescription)"
+        }
+    }
 }
 
 /// Error thrown when a Siri intent can't reach a running app.

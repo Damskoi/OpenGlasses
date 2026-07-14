@@ -11,6 +11,7 @@ struct ConnectGlassesIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("connect_glasses")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -41,6 +42,7 @@ struct DisconnectGlassesIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("disconnect_glasses")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -70,6 +72,7 @@ struct ToggleGlassesIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("toggle_glasses")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }

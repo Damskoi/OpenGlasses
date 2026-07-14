@@ -160,6 +160,9 @@ struct OpenGlassesApp: App {
             }
             .onAppear {
                 AppStateProvider.shared = appState
+                // Plan BQ: refresh Siri's phrase predictions for the parameterized
+                // shortcuts (persona + action catalog) against current runtime data.
+                OpenGlassesShortcuts.updateAppShortcutParameters()
                 ListeningChangedObserver.shared.start { newValue in
                     Task { @MainActor in
                         if appState.listeningEnabled != newValue {

@@ -16,6 +16,7 @@ struct CaptureGlassesPhotoIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("capture_photo")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -53,6 +54,7 @@ struct RecordGlassesVideoIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<Bool> {
+        try IntentSupport.requireEnabled("record_video")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
