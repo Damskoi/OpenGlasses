@@ -51,6 +51,18 @@ struct ChatThreadView: View {
         }
         .navigationTitle(thread?.title ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
+        // Plan BQ P3: let Siri resolve "this" to the open thread (titles/summary only —
+        // same shape the Spotlight index donates; hipaaMode disables inside the modifier).
+        .siriOnscreenContent(thread.map { thread in
+            GlassesContentEntity(record: IndexableRecord(
+                contentType: .conversation,
+                itemId: thread.id,
+                title: thread.title,
+                text: thread.summary ?? "",
+                keywords: [],
+                date: thread.updatedAt
+            ))
+        })
         .toolbar { toolbarContent }
         .onAppear(perform: resumeIfNeeded)
         .onDisappear(perform: pruneIfEmpty)
