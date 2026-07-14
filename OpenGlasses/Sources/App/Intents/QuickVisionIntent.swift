@@ -22,6 +22,19 @@ enum QuickVisionMode: String, AppEnum {
         ]
     }
 
+    /// The Plan BQ built-in action id this mode maps to, for the Settings → Siri & Search
+    /// runtime guard (`IntentSupport.requireEnabled`).
+    var builtinActionId: String {
+        switch self {
+        case .describe: return "describe_scene"
+        case .read: return "read_text"
+        case .translate: return "translate_text"
+        case .health: return "analyze_food"
+        case .identify: return "identify_object"
+        case .accessibility: return "describe_environment"
+        }
+    }
+
     var prompt: String {
         switch self {
         case .describe:
@@ -60,6 +73,7 @@ struct QuickVisionIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled(mode.builtinActionId)
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -87,6 +101,7 @@ struct ReadTextIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("read_text")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -110,6 +125,7 @@ struct AnalyzeFoodIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("analyze_food")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -133,6 +149,7 @@ struct DescribeEnvironmentIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        try IntentSupport.requireEnabled("describe_environment")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }

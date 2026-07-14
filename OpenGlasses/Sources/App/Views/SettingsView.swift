@@ -351,6 +351,12 @@ struct SettingsView: View {
                     Label("Custom Tools", systemImage: "hammer")
                 }
 
+                NavigationLink {
+                    SiriExposureView()
+                } label: {
+                    Label("Siri & Search", systemImage: "mic.badge.plus")
+                }
+
                 if Config.agentModeEnabled {
                     NavigationLink {
                         MCPServerSettingsView()

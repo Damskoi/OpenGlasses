@@ -10,6 +10,7 @@ struct ToggleGeminiLiveIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("gemini_live_toggle")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }

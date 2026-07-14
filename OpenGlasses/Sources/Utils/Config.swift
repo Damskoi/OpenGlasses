@@ -1277,6 +1277,25 @@ struct Config {
         }
     }
 
+    // MARK: - Siri Exposure (Plan BQ)
+
+    /// Which actions the user exposes to Siri (built-in toggles + harvested capabilities +
+    /// hand-made actions). Built-ins default on, everything else off — see
+    /// `SiriExposureConfig`.
+    static var siriExposure: SiriExposureConfig {
+        guard let data = UserDefaults.standard.data(forKey: "siriExposureConfig"),
+              let config = try? JSONDecoder().decode(SiriExposureConfig.self, from: data) else {
+            return SiriExposureConfig()
+        }
+        return config
+    }
+
+    static func setSiriExposure(_ config: SiriExposureConfig) {
+        if let data = try? JSONEncoder().encode(config) {
+            UserDefaults.standard.set(data, forKey: "siriExposureConfig")
+        }
+    }
+
     // MARK: - ElevenLabs TTS
 
     /// ElevenLabs API key for natural TTS voices. Stored in the Keychain (see `KeychainService`).

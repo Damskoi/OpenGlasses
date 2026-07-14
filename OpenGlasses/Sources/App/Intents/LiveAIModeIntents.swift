@@ -37,6 +37,7 @@ struct StartLiveAIModeIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("live_mode_\(mode.rawValue)")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -76,6 +77,7 @@ struct StartMuseumModeIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("live_mode_museum")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -108,6 +110,7 @@ struct StartAccessibilityModeIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("live_mode_accessibility")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
@@ -140,6 +143,7 @@ struct StartTranslatorModeIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        try IntentSupport.requireEnabled("live_mode_translator")
         guard let appState = AppStateProvider.shared else {
             throw IntentError.appNotRunning
         }
