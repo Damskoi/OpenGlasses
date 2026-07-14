@@ -83,6 +83,10 @@ class OpenClawBridge: ObservableObject {
         self.sessionKey = OpenClawBridge.newSessionKey()
     }
 
+    /// BR P4: the gateway session key in use (stable across Live sessions; rotates only on
+    /// deliberate `resetSession()`). Exposed read-only for tests/diagnostics.
+    var currentSessionKey: String { sessionKey }
+
     // MARK: - Endpoint Resolution (Multi-Gateway)
 
     func resolveEndpoint() async -> String {
@@ -273,14 +277,26 @@ class OpenClawBridge: ObservableObject {
 
     // MARK: - Session Management
 
+    /// BR P4: rotate to a fresh gateway context — a *deliberate* act (user-initiated
+    /// "start fresh"), no longer called automatically per Live session. The generation is
+    /// persisted and monotonic, so fragmentation is bounded by explicit resets instead of
+    /// growing one dead session per conversation.
     func resetSession() {
-        sessionKey = OpenClawBridge.newSessionKey()
+        let next = UserDefaults.standard.integer(forKey: Self.sessionGenerationKey) + 1
+        UserDefaults.standard.set(next, forKey: Self.sessionGenerationKey)
+        sessionKey = Self.newSessionKey()
         NSLog("[OpenClaw] New session: %@", sessionKey)
     }
 
+    nonisolated static let messageChannel = "glass"
+    private static let sessionGenerationKey = "openClawSessionGeneration"
+
+    /// BR P4: stable key so gateway-side context persists across Live sessions (the old
+    /// timestamp suffix fragmented the gateway's session list and made the agent amnesiac
+    /// every conversation). Generation 0 is the bare stable key.
     private static func newSessionKey() -> String {
-        let ts = ISO8601DateFormatter().string(from: Date())
-        return "agent:main:glass:\(ts)"
+        let generation = UserDefaults.standard.integer(forKey: sessionGenerationKey)
+        return generation == 0 ? "agent:main:glass" : "agent:main:glass:\(generation)"
     }
 
     // MARK: - WebSocket Chat
@@ -310,6 +326,10 @@ class OpenClawBridge: ObservableObject {
         // Build request with X-Scopes header (OpenClaw protocol v3 requirement)
         var request = URLRequest(url: url)
         request.setValue("chat,skills,sessions,config,tools", forHTTPHeaderField: "X-Scopes")
+        // BR P4: classify our sessions as channel "glass" in the gateway's sessions_list
+        // (without this they appear as generic webchat and channel-scoped status checks
+        // can't find them).
+        request.setValue(OpenClawBridge.messageChannel, forHTTPHeaderField: "x-openclaw-message-channel")
         webSocketTask = wsSession?.webSocketTask(with: request)
         webSocketTask?.resume()
 

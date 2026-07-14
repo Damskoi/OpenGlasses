@@ -1206,6 +1206,19 @@ class AppState: ObservableObject, AppStateProtocol {
             }
         }
 
+        // BR P2: announce a DAT update requirement once per notice — voice-first, the
+        // phone may be pocketed; without this an outdated Meta AI app reads as a mystery
+        // connection failure.
+        let compatToken = cameraService.$compatibilityNotice
+            .compactMap { $0 }
+            .removeDuplicates()
+            .sink { [weak self] notice in
+                guard let self else { return }
+                self.addDebugEvent(notice)
+                Task { await self.speechService.speak(notice) }
+            }
+        cancellables.append(compatToken)
+
         // Field Assist: a vault's linked model is applied only for the session's
         // duration — switch to it when a session starts, restore the prior model when it
         // ends. Observing activeSession covers both UI- and voice-started sessions.

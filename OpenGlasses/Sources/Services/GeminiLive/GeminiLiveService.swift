@@ -66,6 +66,8 @@ class GeminiLiveService: ObservableObject {
     private var receiveTask: Task<Void, Never>?
     private var connectContinuation: CheckedContinuation<Bool, Never>?
     private let delegate = WebSocketDelegate()
+    /// BR P3: stale-callback guard — a superseded connection's late callbacks must no-op.
+    private var generationGate = ConnectionGenerationGate()
     private var urlSession: URLSession!
 
     // Dedicated send queue — keeps JSON serialization, JPEG compression, and base64
@@ -98,6 +100,7 @@ class GeminiLiveService: ObservableObject {
         }
 
         intentionalDisconnect = false
+        let gen = generationGate.advance()
         connectionState = .connecting
 
         let result = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
@@ -106,9 +109,10 @@ class GeminiLiveService: ObservableObject {
             self.delegate.onOpen = { [weak self] protocol_ in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.generationGate.isCurrent(gen) else { return }
                     self.connectionState = .settingUp
                     self.sendSetupMessage()
-                    self.startReceiving()
+                    self.startReceiving(generation: gen)
                 }
             }
 
@@ -116,6 +120,10 @@ class GeminiLiveService: ObservableObject {
                 guard let self else { return }
                 let reasonStr = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "no reason"
                 Task { @MainActor in
+                    guard self.generationGate.isCurrent(gen) else {
+                        NSLog("[WS] Ignoring stale close (superseded connection)")
+                        return
+                    }
                     self.resolveConnect(success: false)
                     self.connectionState = .disconnected
                     self.isModelSpeaking = false
@@ -129,6 +137,10 @@ class GeminiLiveService: ObservableObject {
                 guard let self else { return }
                 let msg = error?.localizedDescription ?? "Unknown error"
                 Task { @MainActor in
+                    guard self.generationGate.isCurrent(gen) else {
+                        NSLog("[WS] Ignoring stale error (superseded connection)")
+                        return
+                    }
                     self.resolveConnect(success: false)
                     self.connectionState = .error(msg)
                     self.isModelSpeaking = false
@@ -147,6 +159,7 @@ class GeminiLiveService: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self, !Task.isCancelled else { return }
                 await MainActor.run {
+                    guard self.generationGate.isCurrent(gen) else { return }
                     if self.connectionState == .connecting || self.connectionState == .settingUp {
                         self.connectionState = .error("Connection timed out")
                     }
@@ -160,6 +173,7 @@ class GeminiLiveService: ObservableObject {
 
     func disconnect() {
         intentionalDisconnect = true
+        _ = generationGate.advance()   // BR P3: outstanding callbacks are stale from here
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnecting = false
@@ -369,7 +383,7 @@ class GeminiLiveService: ObservableObject {
         }
     }
 
-    private func startReceiving() {
+    private func startReceiving(generation: UInt64) {
         receiveTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -393,6 +407,7 @@ class GeminiLiveService: ObservableObject {
                     if !Task.isCancelled {
                         let reason = error.localizedDescription
                         await MainActor.run {
+                            guard self.generationGate.isCurrent(generation) else { return }
                             self.resolveConnect(success: false)
                             self.connectionState = .disconnected
                             self.isModelSpeaking = false

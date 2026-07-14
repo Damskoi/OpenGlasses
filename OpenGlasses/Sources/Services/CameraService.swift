@@ -58,6 +58,17 @@ class CameraService: ObservableObject {
     private var isRecoveringFromStall = false
     /// Number of consecutive stall recoveries (for diagnostics).
     private var stallRecoveryCount = 0
+    /// BR P2: consecutive FAILED recoveries — drives the rebuild-stream-vs-reset-session
+    /// tiering in `StreamRecoveryPolicy`. Reset on any successful recovery.
+    private var consecutiveRecoveryFailures = 0
+    /// BR P2: listener on the DeviceSession's error stream (update-required and terminal
+    /// device errors surface here, not on the camera Stream's errorPublisher).
+    private var sessionErrorTask: Task<Void, Never>?
+
+    /// BR P2: actionable compatibility copy ("update the Meta AI app…") when the DAT layer
+    /// reports an update requirement. Nil when compatible. Observed by AppState for a
+    /// one-time announcement.
+    @Published private(set) var compatibilityNotice: String?
 
     /// iPhone back-camera fallback, used when the glasses camera is unavailable.
     private let phoneSource = PhoneCameraSource()
@@ -156,7 +167,17 @@ class CameraService: ObservableObject {
         guard let deviceSession else { throw CameraError.captureFailed }
 
         if deviceSession.state != .started {
-            try deviceSession.start()
+            do {
+                try deviceSession.start()
+            } catch {
+                // BR P2: an update-required refusal must read as "go update", not a
+                // generic failure.
+                if let notice = DATCompatibilityMessage.message(for: error) {
+                    compatibilityNotice = notice
+                    onDebugEvent?(notice)
+                }
+                throw error
+            }
             let deadline = ContinuousClock.now + .seconds(20)
             while ContinuousClock.now < deadline {
                 if deviceSession.state == .started { break }
@@ -188,7 +209,24 @@ class CameraService: ObservableObject {
         }
         streamSession = stream
         attachListeners(to: stream)
+        watchSessionErrors(on: deviceSession)
         NSLog("[Camera] Created persistent Stream (.\(Config.cameraResolution), \(fps)fps)")
+    }
+
+    /// BR P2: device-level errors (incl. `.datAppOnTheGlassesUpdateRequired`) arrive on the
+    /// DeviceSession's error stream — the camera Stream's errorPublisher never carries them.
+    private func watchSessionErrors(on session: DeviceSession) {
+        sessionErrorTask?.cancel()
+        sessionErrorTask = Task { [weak self] in
+            for await error in session.errorStream() {
+                guard let self, !Task.isCancelled else { return }
+                NSLog("[Camera] DeviceSession error: %@", String(describing: error))
+                if let notice = DATCompatibilityMessage.message(for: error) {
+                    self.compatibilityNotice = notice
+                    self.onDebugEvent?(notice)
+                }
+            }
+        }
     }
 
     /// Attach all publishers to the session (state, video frames, photo data, errors).
@@ -470,28 +508,57 @@ class CameraService: ObservableObject {
         stallDetectionTask = nil
     }
 
-    /// Tear down and recreate the stream session to recover from a decoder stall.
+    /// Recover from a decoder stall. BR P2: tiered — rebuild only the Stream on the
+    /// retained DeviceSession first (the session is the expensive half: BT connection +
+    /// permission state); escalate to a full session reset only after repeated failures.
     private func recoverFromStall() async {
-        NSLog("[Camera] Stall recovery #%d — resetting session", stallRecoveryCount)
-        onDebugEvent?("Camera stall recovery #\(stallRecoveryCount)")
+        let action = StreamRecoveryPolicy.action(consecutiveFailures: consecutiveRecoveryFailures)
+        NSLog("[Camera] Stall recovery #%d (%@)", stallRecoveryCount, String(describing: action))
+        onDebugEvent?("Camera stall recovery #\(stallRecoveryCount) (\(action))")
 
-        // Tear down the current session
-        await resetSession()
+        switch action {
+        case .rebuildStream:
+            teardownStreamOnly()
+        case .resetSession:
+            await resetSession()
+        }
 
-        // Recreate
         do {
             try await ensureSession()
             try await waitForStreaming()
             lastFrameTime = Date()
+            consecutiveRecoveryFailures = 0
             NSLog("[Camera] Stall recovery successful — streaming resumed")
         } catch {
-            NSLog("[Camera] Stall recovery failed: %@", error.localizedDescription)
+            consecutiveRecoveryFailures += 1
+            NSLog("[Camera] Stall recovery failed (%d consecutive): %@",
+                  consecutiveRecoveryFailures, error.localizedDescription)
+            if case .rebuildStream = action {
+                // Stream-only rebuild failed — make the next attempt (or the next stall
+                // tick) escalate rather than looping at the cheap tier.
+                await resetSession()
+            }
             isStreaming = false
         }
     }
 
+    /// BR P2: drop the Stream and its listeners but keep the DeviceSession alive — a failed
+    /// stream must not strand a half-open session (`ensureSession` re-adds the stream on
+    /// the retained session).
+    private func teardownStreamOnly() {
+        streamSession?.stop()
+        stateListenerToken = nil
+        videoFrameListenerToken = nil
+        photoListenerToken = nil
+        errorListenerToken = nil
+        streamSession = nil
+        NSLog("[Camera] Stream torn down (session retained)")
+    }
+
     /// Reset the session completely (for error recovery).
     private func resetSession() async {
+        sessionErrorTask?.cancel()
+        sessionErrorTask = nil
         if let session = streamSession {
             session.stop()
         }
