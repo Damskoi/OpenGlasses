@@ -82,7 +82,10 @@ class OpenClawEventClient {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         session = URLSession(configuration: config)
-        webSocketTask = session?.webSocketTask(with: url)
+        // BR P4: same channel classification as the bridge socket.
+        var request = URLRequest(url: url)
+        request.setValue(OpenClawBridge.messageChannel, forHTTPHeaderField: "x-openclaw-message-channel")
+        webSocketTask = session?.webSocketTask(with: request)
         webSocketTask?.resume()
 
         NSLog("[OpenClawWS] Connecting to %@ (gateway: %@)", LogRedaction.redact(url.absoluteString), gateway.name)

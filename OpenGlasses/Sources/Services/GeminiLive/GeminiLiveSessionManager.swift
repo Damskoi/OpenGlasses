@@ -178,6 +178,8 @@ class GeminiLiveSessionManager: ObservableObject {
             Task { @MainActor in
                 self.userTranscript += text
                 self.aiTranscript = ""
+                // BR P1: a user turn resets the runaway-tool-call window.
+                self.toolCallRouter?.noteUserTurn()
             }
         }
 
@@ -220,7 +222,15 @@ class GeminiLiveSessionManager: ObservableObject {
                 NSLog("[Session] Reconnected — re-configuring session")
                 // Re-configure with current settings (including fresh location)
                 let includeOpenClaw = Config.isOpenClawAgentActive   // BK P0: gate on Agent Mode too
-                let toolDefs = ToolDeclarations.allDeclarations(registry: self.nativeToolRouter?.registry, includeOpenClaw: includeOpenClaw)
+                var toolDefs = ToolDeclarations.allDeclarations(registry: self.nativeToolRouter?.registry, includeOpenClaw: includeOpenClaw)
+                // BR P1: breaker-suspended tools stay out of the re-declared list — the new
+                // setup message must not re-offer what this session already tripped on.
+                if let suspended = self.toolCallRouter?.suspendedToolNames, !suspended.isEmpty {
+                    toolDefs = toolDefs.filter { decl in
+                        guard let name = decl["name"] as? String else { return true }
+                        return !suspended.contains(name)
+                    }
+                }
                 self.geminiService.configure(
                     systemInstruction: self.buildSystemInstruction(),
                     toolDeclarations: toolDefs
@@ -244,7 +254,9 @@ class GeminiLiveSessionManager: ObservableObject {
         if hasNativeTools || hasOpenClaw {
             if let bridge = openClawBridge, hasOpenClaw {
                 await bridge.checkConnection()
-                bridge.resetSession()
+                // BR P4: no resetSession() here — the gateway session key is stable now, so
+                // the OpenClaw-side agent keeps context across Live sessions. Reset is a
+                // deliberate user action, not a side effect of starting a session.
             }
 
             let bridge = openClawBridge ?? OpenClawBridge()

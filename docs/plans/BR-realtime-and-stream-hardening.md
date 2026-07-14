@@ -1,6 +1,7 @@
 # Plan BR — Realtime Session & Camera Stream Hardening
 
-**Status: 📋 Planned (2026-07-15).** Three verified gaps, each with a deterministic core;
+**Status: 🚧 Implemented (PR [#236](https://github.com/straff2002/OpenGlasses/pull/236), 2026-07-15); on-device smoke owed.** Four
+verified gaps (P4 added after a gateway-hygiene review), each with a deterministic core;
 one PR. Sourced from a systematic review of community work on comparable glasses apps
 (techniques adopted on their own merits) — everything below was checked against this
 codebase first; the many techniques we already have (context-window compression,
@@ -9,35 +10,46 @@ are *not* re-listed.
 
 ## P1 — Live-session tool-call circuit breaker
 
-**Gap (code-verified):** neither `GeminiLive/` nor `OpenAIRealtime/` bounds tool calling.
-A model looping the same failing tool — or ping-ponging between tools — burns battery and
-quota mid-session with no exit. `SafetySupervisor` (Plan S) governs *planned agent runs*,
-not the realtime paths.
+**Gap (code-verified):** the Gemini Live path doesn't bound tool calling. A model looping
+the same failing tool — or ping-ponging between tools — burns battery and quota
+mid-session with no exit. `SafetySupervisor` (Plan S) governs *planned agent runs*, not
+the realtime path. **As-built discovery:** `OpenAIRealtime/` has *no tool calling at all*
+(no `tools` in `session.update`; function-call events fall through to `default:`) — so
+there is nothing to bound there; if tools are ever added, the breaker is ready to reuse.
 
-- Pure `ToolCallBreaker`: per-session sliding window counting (a) consecutive calls with
-  no intervening user turn, (b) repeated identical tool+args failures. Trip thresholds
-  configurable; on trip → inject a synthetic tool result telling the model the tool is
-  suspended this session, stop advertising it in the next setup message, surface one TTS
-  notice (BK P2c narration pattern).
-- Wire into both session managers at the single tool-dispatch choke point each already has.
-- Tests: threshold trips, window reset on user turn, identical-failure detection,
-  suspension list feeding setup-message tool filtering.
+- Pure `ToolCallBreaker` (as-built): per-session windows for (a) consecutive calls with no
+  intervening user turn (default 12), (b) repeated identical tool+args failures (default
+  3, SHA-fingerprinted args). On trip → the tool is suspended for the session and the
+  refusal/notice rides back **in-band as the tool result**, instructing the model to tell
+  the user and stop — no side-channel TTS fighting the live audio (deliberate deviation
+  from the drafted BK-P2c narration).
+- Wired in `ToolCallRouter` (admit-before-dispatch + outcome recording), user-turn reset
+  via `onInputTranscription`, and suspended tools filtered out of re-declared tool lists
+  on reconnect.
+- Tests: threshold trips, user-turn reset, identical-failure streaks (per-args, cleared by
+  success), args-key stability, suspension persistence.
 
 ## P2 — Camera stream resilience + compatibility surfacing
 
 **Gap:** a stream failure can silently wedge the session, and an outdated Meta AI app /
 glasses firmware presents as a mystery connection failure.
 
-- Retain the `DeviceSession` across stream failures — tear down and rebuild the `Stream`,
-  not the session; explicit teardown ordering so a failed stream can't strand the session
-  in a half-open state. Pure `StreamRecoveryPolicy` (failure class → rebuild stream /
-  rebuild session / give up) + thin edge in `CameraService`.
-- Surface DAT compatibility: detect the SDK's update-required signals and turn them into
-  actionable copy ("Update the Meta AI app to keep streaming") instead of generic errors —
-  settings row + one-time TTS notice. (Exact signal source verified at implementation
-  against the 0.8 `.swiftinterface` — ground truth per house rule.)
-- Tests: policy classification table; recovery sequencing on a fake session/stream seam
-  (no `Wearables` in unit tests).
+- As-built: stall recovery (the existing trigger) is now **tiered** — `teardownStreamOnly()`
+  rebuilds the `Stream` on the retained `DeviceSession` first (DAT 0.8 has no
+  `removeStream`; rebuild = stop + `addStream(config:)`), escalating to a full session
+  reset only after two consecutive failed recoveries (`StreamRecoveryPolicy`); a failed
+  stream-tier attempt immediately resets the session so the next pass starts clean. The
+  Stream `errorPublisher` handling is deliberately unchanged (capture fast-fail only) —
+  recovery stays stall-driven, avoiding churn on benign errors.
+- Compatibility (verified against the 0.8 `.swiftinterface`): update-required signals live
+  in **MWDATCore**, not the camera stream — `DeviceSessionError
+  .datAppOnTheGlassesUpdateRequired` (thrown by `start()` and emitted on
+  `DeviceSession.errorStream()`, both now observed) and `Compatibility
+  .deviceUpdateRequired/.sdkUpdateRequired`. `DATCompatibilityMessage` maps them to
+  actionable copy, published as `CameraService.compatibilityNotice` and announced once via
+  the AppState TTS sink (voice-first; the phone may be pocketed).
+- Tests: tiering table, compatibility message mapping (update-required vs thermal vs
+  compatible).
 
 ## P3 — Realtime WebSocket connection-generation guard
 
@@ -47,11 +59,29 @@ callback therefore fires against the *new* connection — spurious failure/recon
 top of a healthy socket. Plan BD's `reconnectPending` coalescing narrows but does not
 close this.
 
-- Monotonic `connectionGeneration`; every delegate callback (incl. the connect-timeout
-  task) captures its generation and no-ops if superseded. Same audit + fix for
-  `OpenAIRealtime`'s socket handling.
-- Tests: stale-close ignored, stale-error ignored, stale-timeout ignored, current-gen
-  callbacks still flow; reconnect counter unaffected by superseded callbacks.
+- As-built: pure `ConnectionGenerationGate`; `connect()` advances and captures a
+  generation, every callback (open/close/error, connect-timeout, receive-loop failure)
+  no-ops if superseded, and `disconnect()` advances so post-teardown stragglers are stale
+  by construction. Applied identically to `GeminiLiveService` and
+  `OpenAIRealtimeService`.
+- Tests: gate supersession semantics (the callback wiring is mechanical capture of the
+  gate — exercised by the full-suite session tests).
+
+## P4 — Gateway session hygiene (added 2026-07-15)
+
+**Gap (code-verified):** our gateway sessions carried timestamp-suffixed keys
+(`agent:main:glass:<ISO8601>`) regenerated on every Live session start — the gateway
+accumulates one dead session per conversation and its agent starts amnesiac each time —
+and no channel classification header, so sessions appear as generic webchat in
+`sessions_list`.
+
+- As-built: stable `agent:main:glass` key by default; `resetSession()` is now a
+  *deliberate* act (persisted monotonic generation → `agent:main:glass:<n>`), no longer
+  called automatically per Live session. `x-openclaw-message-channel: glass` sent on both
+  gateway sockets (bridge + event client). Behaviour change, documented: the gateway-side
+  agent now retains context across Live sessions (Agent-Mode-gated surface).
+- Tests: default-key stability across bridge instances, explicit rotation + persistence,
+  channel constant.
 
 ## Rider — Live-model migration checklist (documentation only)
 
