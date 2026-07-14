@@ -1,7 +1,14 @@
 # Plan BJ — Off-Main Audio-Session Activation (Thread Performance hang-risk)
 
-**Status:** 📋 Planned (re-scoped 2026-07-10 after a code-verified review; now two PRs).
-Deterministic seam first; the live audio behaviour is device-verified only.
+**Status:** 🚧 Code complete — PR1 seam + serialization merged
+([#218](https://github.com/straff2002/OpenGlasses/pull/218)), PR2 wiring merged (core
+[#220](https://github.com/straff2002/OpenGlasses/pull/220), leaves
+[#222](https://github.com/straff2002/OpenGlasses/pull/222)); Plan BO
+([#223](https://github.com/straff2002/OpenGlasses/pull/223)) followed. **Only the
+on-glasses smoke test remains** (see Verification) — it was the stated merge gate but the
+PRs merged ahead of hardware time, so it's now a post-merge validation owed on the next
+device session. (Status header corrected 2026-07-15; it still said "Planned" with all
+three PRs merged.)
 
 ## The problem
 Xcode's Thread Performance Checker flags **AVAudioSession hang-risk** on the app's hottest path:
