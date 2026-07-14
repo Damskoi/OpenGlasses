@@ -181,8 +181,13 @@ Tests cover the planner exhaustively; the edge is a dumb executor.
   verified): `startCapture` requires `captureMode`/`timerDuration`/`device`, each an
   `@AppEnum(schema: .camera.*)` — v1 honours mode (photo→silent capture, video→recorder),
   timer/device accepted but immediate/glasses-only.
-- On-device Apple Intelligence verification (phrases, onscreen "this" resolution) deferred
-  to a hardware session, same rhythm as BJ/BO smoke gates.
+- **Assistant schema** (follow-up PR): `@AppIntent(schema: .assistant.activate)` twin of
+  `AskOpenGlassesIntent` — registers OpenGlasses as a *voice assistant* for Apple's
+  pre-trained activation phrasing/Action-button surface. iOS 26.2+ only
+  (`@available`-gated; the domain doesn't exist below), and the schema contract requires
+  `supportedModes = .foreground` instead of `openAppWhenRun` (metadata-processor enforced).
+- On-device Apple Intelligence verification (phrases, onscreen "this" resolution, assistant
+  activation) deferred to a hardware session, same rhythm as BJ/BO smoke gates.
 
 **Riders (from WWDC26 App Schemas guidance):**
 - Per-item `.appEntityIdentifier()` annotations in list views (chat messages, script list)
