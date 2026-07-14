@@ -72,7 +72,9 @@ Notes, meeting summaries, saved locations, teleprompter scripts, playbooks, and 
 
 #### Pre-Trained Siri Phrasing (App Schemas)
 
-OpenGlasses adopts Apple's **camera** and **assistant** App Intent schemas, so Apple-trained phrasing works with no custom shortcut: "take a photo", "start recording a video", and (iOS 26.2+) activating OpenGlasses as a **voice assistant** from Siri or the Action button. Siri can also resolve **"this"** against the open chat thread — "summarize this" just works.
+OpenGlasses adopts Apple's **camera** and **assistant** App Intent schemas, so Apple-trained phrasing works with no custom shortcut: "take a photo", "start recording a video". Siri can also resolve **"this"** against the open chat thread — "summarize this" just works.
+
+The assistant schema additionally registers OpenGlasses for the **side-button voice-assistant slot** (replace Siri with OpenGlasses) — currently a **Japan-only** surface (iOS 26.2+, Apple Account region set to Japan, required by Japan's Mobile Software Competition Act; expected to reach more regions as regulation spreads). Everywhere else, the Action button route via **Settings → Action Button → Shortcut → "Ask OpenGlasses"** works today.
 
 ### On-Device Local LLM
 

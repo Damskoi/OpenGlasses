@@ -58,7 +58,9 @@ OpenGlasses 内置 App Intents + Siri 快捷指令，可以直接通过 Siri 驱
 
 #### Apple 预训练 Siri 短语（App Schemas）
 
-OpenGlasses 采用了 Apple 的**相机**与**助手** App Intent Schema，因此 Apple 预训练的说法无需自定义快捷指令即可使用："拍张照片"、"开始录像"，以及（iOS 26.2+）从 Siri 或操作按钮将 OpenGlasses 作为**语音助手**唤起。Siri 还能把**"这个"**解析为当前打开的聊天线程——"总结一下这个"即可生效。
+OpenGlasses 采用了 Apple 的**相机**与**助手** App Intent Schema，因此 Apple 预训练的说法无需自定义快捷指令即可使用："拍张照片"、"开始录像"。Siri 还能把**"这个"**解析为当前打开的聊天线程——"总结一下这个"即可生效。
+
+助手 Schema 还将 OpenGlasses 注册为**侧边按钮语音助手**（用 OpenGlasses 替换 Siri）——该入口目前**仅限日本**（iOS 26.2+，Apple 账户地区需设为日本；源于日本《智能手机软件竞争促进法》，预计随各地监管推进会扩展到更多地区）。其他地区可通过 **设置 → 操作按钮 → 快捷指令 → "Ask OpenGlasses"** 实现同样效果。
 
 ### 本地设备 LLM
 
