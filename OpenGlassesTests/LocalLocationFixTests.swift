@@ -103,6 +103,19 @@ final class LocalLocationFixTests: XCTestCase {
                        "device-retested 2026-07-15: the 4-bit checkpoint fails VLM weight mapping (keyNotFound k_norm) — image turns refuse honestly instead")
     }
 
+    func testCurrentDateTimeLineFormat() {
+        let tz = TimeZone(identifier: "Pacific/Auckland")!
+        var components = DateComponents()
+        (components.year, components.month, components.day, components.hour, components.minute) = (2026, 7, 15, 18, 41)
+        components.timeZone = tz
+        let date = Calendar(identifier: .gregorian).date(from: components)!
+        let line = LLMService.currentDateTimeLine(now: date, timeZone: tz)
+        XCTAssertTrue(line.contains("2026"), line)
+        XCTAssertTrue(line.contains("July"), line)
+        XCTAssertTrue(line.lowercased().contains("wednesday"), "15 July 2026 is a Wednesday: \(line)")
+        XCTAssertTrue(line.contains("Pacific/Auckland"), line)
+    }
+
     func testSpokenErrorPolicyHidesInternals() {
         struct Fake: LocalizedError { let errorDescription: String? }
         // The live-traced leak: a DecodingError path read aloud.

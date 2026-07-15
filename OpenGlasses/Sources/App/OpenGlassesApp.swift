@@ -2722,6 +2722,11 @@ class AppState: ObservableObject, AppStateProtocol {
                 lastResponse = result
                 print("⚡ Direct tool call: \(directCall.toolName) → \(result)")
 
+                // Follow-up continuity: the LLM never saw this exchange (tier-0 bypasses
+                // it) — record it in the model's history so "what about tomorrow?" can
+                // refer back to the forecast just spoken.
+                llmService.recordExternalExchange(user: query, assistant: result)
+
                 if Config.conversationPersistenceEnabled {
                     conversationStore.appendMessage(role: "assistant", content: result)
                 }

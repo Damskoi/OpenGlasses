@@ -353,6 +353,11 @@ class LLMService: ObservableObject {
         if let playbook = playbookContext {
             prompt += "\n\n\(playbook)"
         }
+        // Models have no clock — without this one ~15-token line they answer date/time
+        // reasoning from their training cutoff, confidently wrong ("local LLM doesn't
+        // know day or time"). Unconditional: cheap enough for every turn, both paths.
+        prompt += "\n\nCURRENT DATE & TIME: \(Self.currentDateTimeLine())"
+
         if let location = locationContext {
             prompt += "\n\nUSER LOCATION: \(location)"
         }
@@ -2099,6 +2104,25 @@ class LLMService: ObservableObject {
         "where_am_i"
     ]
 
+    /// Record an exchange the LLM didn't produce — tier-0 direct tool answers — so
+    /// follow-up turns can see it. Without this, "what about tomorrow?" after a direct
+    /// weather answer reached the model with no forecast anywhere in its history (the
+    /// direct path bypasses the LLM entirely; it only wrote to the UI transcript).
+    func recordExternalExchange(user: String, assistant: String) {
+        conversationHistory.append(["role": "user", "content": user])
+        conversationHistory.append(["role": "assistant", "content": assistant])
+        trimHistory()
+    }
+
+    /// "Tuesday, 15 July 2026, 6:41 pm (Pacific/Auckland)" — injected into every system
+    /// prompt. Pure and injectable for tests.
+    nonisolated static func currentDateTimeLine(now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "EEEE, d MMMM yyyy, h:mm a"
+        return "\(formatter.string(from: now)) (\(timeZone.identifier))"
+    }
+
     /// Parse the local model's `<tool_call>` markup. Extracted (pure) from `sendLocal` so
     /// the announce-without-action retry can re-parse the corrective generation.
     nonisolated static func parseLocalToolCall(_ response: String) -> (name: String, args: [String: Any])? {
@@ -2182,8 +2206,10 @@ class LLMService: ObservableObject {
             fullPrompt += Self.localToolInstructions(toolNames: toolNames)
         }
 
-        // Build history — keep only last 2 exchanges for local models (context is precious)
-        let recentHistory = conversationHistory.suffix(4)
+        // Build history — last 3 exchanges for local models (context is precious; the
+        // LocalModelBudget cap still guards the ceiling). Was 2 — too short for a
+        // follow-up that references the answer before last.
+        let recentHistory = conversationHistory.suffix(6)
         var history: [(role: String, content: String)] = []
         for turn in recentHistory {
             if let role = turn["role"] as? String, let content = turn["content"] as? String {
