@@ -29,10 +29,31 @@ class BroadcastService: ObservableObject {
     private var durationTimer: Timer?
     private var startTime: Date?
 
-    private let outputWidth = 720
-    private let outputHeight = 1280 // Portrait for glasses
+    // BS P2: output geometry from Settings (portrait 720×1280 / landscape 1280×720).
+    // Mutated only in startBroadcast (before frames flow), read from the frame queue —
+    // same nonisolated(unsafe) discipline as the pool/counters below.
+    nonisolated(unsafe) private var outputWidth = 720
+    nonisolated(unsafe) private var outputHeight = 1280
     nonisolated(unsafe) private var frameCount: Int = 0
     private let targetFPS: Double = 15
+
+    // BS P2: mic audio rides the shared wake-word tap (same source the video recorder
+    // uses) — no second AVAudioEngine, no audio-session churn. Streams are silent while
+    // listening is disabled (the tap isn't running); documented limitation.
+    weak var audioProvider: BroadcastAudioProviding?
+    nonisolated(unsafe) private var audioClock = BroadcastAudioClock()
+    private static let audioConsumerId = "broadcast_audio"
+
+    // BS P3: source switching + dual capture. `activeSource` drives UI; the
+    // nonisolated(unsafe) mirrors are what the frame queue reads (MainActor writes them
+    // before/between frames; frames are routed serially).
+    @Published private(set) var activeSource: BroadcastVideoSource = .glasses
+    private var selector = BroadcastSourceSelector(initial: .glasses)
+    private let phoneVideoSource = PhoneVideoSource()
+    nonisolated(unsafe) private var mainSourceMirror: BroadcastVideoSource = .glasses
+    nonisolated(unsafe) private var dualCaptureMirror = false
+    nonisolated(unsafe) private var latestSecondaryFrame: UIImage?
+    nonisolated(unsafe) private var lastMainPush = Date.distantPast
 
     /// Reused pixel-buffer pool so each frame doesn't allocate a fresh ~3.7 MB buffer (~55 MB/s of
     /// churn at 15 fps). Mirrors VideoRecordingService. Frames are pushed serially, matching its
@@ -55,6 +76,19 @@ class BroadcastService: ObservableObject {
             broadcastError = "Configure RTMP URL and stream key in Settings"
             throw BroadcastError.notConfigured
         }
+
+        // BS P2/P3: apply configured geometry and starting source.
+        let geometry = BroadcastGeometry.outputSize(orientation: Config.broadcastOrientation)
+        outputWidth = geometry.width
+        outputHeight = geometry.height
+        pixelBufferPool = nil   // dims may have changed since the last broadcast
+        let startSource = BroadcastVideoSource(rawValue: Config.broadcastDefaultSource) ?? .glasses
+        selector = BroadcastSourceSelector(initial: startSource)
+        activeSource = startSource
+        mainSourceMirror = startSource
+        dualCaptureMirror = Config.broadcastDualCapture
+        latestSecondaryFrame = nil
+        audioClock = BroadcastAudioClock()
 
         // Parse URL: split into connection URL and stream name
         // e.g. rtmp://a.rtmp.youtube.com/live2 + streamKey
@@ -133,13 +167,81 @@ class BroadcastService: ObservableObject {
             }
         }
 
-        // Subscribe to camera frames
+        // Subscribe to glasses frames (always — they're the main or the dual inset).
         let interval = 1.0 / targetFPS
         frameSubscription = publisher
             .throttle(for: .seconds(interval), scheduler: DispatchQueue.global(qos: .userInitiated), latest: true)
             .sink { [weak self] image in
-                self?.pushFrame(image)
+                self?.handleFrame(image, from: .glasses)
             }
+
+        // BS P3: phone camera runs when it's the active source or dual capture wants it.
+        startPhoneSourceIfNeeded()
+
+        // BS P2: attach mic audio from the shared tap.
+        if let provider = audioProvider {
+            provider.addAudioBufferConsumer(id: Self.audioConsumerId) { [weak self] buffer in
+                self?.appendAudio(buffer)
+            }
+            NSLog("[Broadcast] Mic audio attached via shared tap")
+        } else {
+            NSLog("[Broadcast] No audio provider — stream is video-only")
+        }
+    }
+
+    /// BS P3: route a frame by source — active source pushes (composited with the cached
+    /// secondary when dual capture is on), the other source only refreshes the cache.
+    private nonisolated func handleFrame(_ image: UIImage, from source: BroadcastVideoSource) {
+        if mainSourceMirror == source {
+            // Phone frames arrive unthrottled (~30fps) — pace the main push to targetFPS.
+            let now = Date()
+            guard now.timeIntervalSince(lastMainPush) >= (1.0 / targetFPS) * 0.9 else { return }
+            lastMainPush = now
+            let inset = dualCaptureMirror ? latestSecondaryFrame : nil
+            let frame = inset.map { FrameCompositor.compose(main: image, inset: $0) } ?? image
+            pushFrame(frame)
+        } else {
+            latestSecondaryFrame = image
+        }
+    }
+
+    /// BS P3: switch the live video source without touching the RTMP connection.
+    /// Debounced; returns whether the switch was applied.
+    @discardableResult
+    func switchSource(_ source: BroadcastVideoSource) -> Bool {
+        guard isBroadcasting else { return false }
+        guard selector.requestSwitch(to: source, now: Date()) else { return false }
+        activeSource = source
+        mainSourceMirror = source
+        latestSecondaryFrame = nil
+        startPhoneSourceIfNeeded()
+        NSLog("[Broadcast] Source switched to %@", source.rawValue)
+        return true
+    }
+
+    private func startPhoneSourceIfNeeded() {
+        let phoneWanted = activeSource.isPhone || (dualCaptureMirror && activeSource == .glasses)
+        if phoneWanted {
+            let position = activeSource.phonePosition ?? .back
+            phoneVideoSource.start(position: position) { [weak self] image in
+                guard let self else { return }
+                let kind: BroadcastVideoSource = position == .front ? .phoneFront : .phoneBack
+                self.handleFrame(image, from: kind)
+            }
+        } else {
+            phoneVideoSource.stop()
+        }
+    }
+
+    /// BS P2: shared-tap mic buffer → the mixer's audio track (PTS from a running
+    /// sample-count clock; MediaMixer routes AVAudioPCMBuffer appends to the audio IO).
+    private nonisolated func appendAudio(_ buffer: AVAudioPCMBuffer) {
+        let sampleTime = audioClock.take(frames: buffer.frameLength)
+        let when = AVAudioTime(sampleTime: sampleTime, atRate: buffer.format.sampleRate)
+        Task { @MainActor [weak self] in
+            guard let self, self.isBroadcasting, let mixer = self.mediaMixer else { return }
+            await mixer.append(buffer, when: when)
+        }
     }
 
     /// Stop the broadcast.
@@ -148,6 +250,9 @@ class BroadcastService: ObservableObject {
 
         frameSubscription?.cancel()
         frameSubscription = nil
+        audioProvider?.removeAudioBufferConsumer(id: Self.audioConsumerId)
+        phoneVideoSource.stop()
+        latestSecondaryFrame = nil
         durationTimer?.invalidate()
         durationTimer = nil
         pixelBufferPool = nil
@@ -204,8 +309,8 @@ class BroadcastService: ObservableObject {
     private nonisolated func pushFrame(_ image: UIImage) {
         guard let cgImage = image.cgImage else { return }
 
-        let width = 720
-        let height = 1280
+        let width = outputWidth
+        let height = outputHeight
 
         // Acquire a pixel buffer from the reused pool instead of allocating a new one per frame.
         guard let buffer = dequeuePixelBuffer(width: width, height: height) else { return }
@@ -223,8 +328,14 @@ class BroadcastService: ObservableObject {
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return }
 
-        // Draw the image scaled to fill the buffer
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // BS P2: aspect-fit with black letterbox — stretch-to-fill distorted any source
+        // whose aspect didn't match the output (phone landscape into portrait, etc.).
+        context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let fit = BroadcastGeometry.aspectFitRect(
+            imageSize: CGSize(width: cgImage.width, height: cgImage.height),
+            in: CGSize(width: width, height: height))
+        context.draw(cgImage, in: fit)
 
         // Create CMSampleBuffer
         guard let sampleBuffer = Self.createSampleBuffer(from: buffer) else { return }
@@ -307,4 +418,12 @@ enum BroadcastError: LocalizedError {
         case .connectionFailed(let reason): return "Broadcast connection failed: \(reason)"
         }
     }
+}
+
+
+/// BS P2: seam for the shared mic tap (adopted by WakeWordService — the same fan-out the
+/// video recorder uses). Kept minimal so tests can inject a fake.
+protocol BroadcastAudioProviding: AnyObject {
+    func addAudioBufferConsumer(id: String, handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void)
+    func removeAudioBufferConsumer(id: String)
 }

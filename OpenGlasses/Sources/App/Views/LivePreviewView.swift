@@ -111,6 +111,31 @@ struct LivePreviewView: View {
                         }
                     }
                     .accessibilityLabel(appState.broadcastService.isBroadcasting ? "Stop Broadcasting" : "Go Live")
+
+                    // BS P3: mid-stream source switch — no RTMP teardown, just re-routes
+                    // which camera feeds the encoder (debounced in the service).
+                    if appState.broadcastService.isBroadcasting {
+                        Menu {
+                            ForEach(BroadcastVideoSource.allCases, id: \.rawValue) { source in
+                                Button {
+                                    appState.broadcastService.switchSource(source)
+                                } label: {
+                                    if appState.broadcastService.activeSource == source {
+                                        Label(source.displayLabel, systemImage: "checkmark")
+                                    } else {
+                                        Text(source.displayLabel)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                                .font(.title2)
+                                .foregroundStyle(.white)
+                                .frame(width: 56, height: 56)
+                                .glassEffect(in: .circle)
+                        }
+                        .accessibilityLabel("Switch Broadcast Camera")
+                    }
                 }
                 .padding(.bottom, 40)
             }

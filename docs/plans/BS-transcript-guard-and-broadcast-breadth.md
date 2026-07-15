@@ -1,9 +1,27 @@
 # Plan BS — STT Transcript Guard & Broadcast Breadth
 
-**Status: 📋 Planned (2026-07-15).** Two workstreams in one plan: a small correctness fix
-for the on-device speech stack, and feature breadth for the RTMP broadcast vertical.
-House style: deterministic cores first; the RTMP/device edges are gated on a streaming
-endpoint + glasses session. Three phases, one PR each.
+**Status: 🚧 Implemented — all three phases in one PR ([#238](https://github.com/straff2002/OpenGlasses/pull/238), 2026-07-15); endpoint/device smoke owed.**
+Two workstreams in one plan: a correctness fix for the speech stack, and feature breadth
+for the RTMP broadcast vertical.
+
+**As-built notes:**
+- P1: ambient captions and memory rewind turn out to use Apple Speech/Deepgram (not the
+  SenseVoice path), so the guard is layered: energy gate + filter in `OnDeviceASREngine`
+  (the SenseVoice choke point), and the conservative artifact filter additionally at
+  `AmbientCaptionService.finalizeCaption` and the memory-rewind result — defense-in-depth
+  across engines, since the downstream propagation (summaries → Spotlight → Brain) doesn't
+  care which engine hallucinated. There is no single cross-engine post-text choke point.
+- P2: platform ingest presets were already shipped in Settings (dropped from scope).
+  Delivered: mic audio + orientation + an aspect-fit letterbox fix (the old path stretched
+  to fill). Audio rides the shared wake-word tap (`BroadcastAudioProviding` seam — the
+  same fan-out the video recorder uses; no second engine, no session churn); documented
+  limitation: the stream is silent while listening is disabled, because the tap isn't
+  running.
+- P3: `PhoneCameraSource` is still-capture only, so a new `PhoneVideoSource`
+  (`AVCaptureVideoDataOutput` → UIImage frames, audio-session non-configuring) feeds the
+  phone sources. Mid-stream switching via a debounced `BroadcastSourceSelector` and a
+  camera menu on the live controls; dual capture composites the cached secondary frame
+  through `FrameCompositor` on the existing CPU path.
 
 ## P1 — Transcript guard (silence-artifact protection)
 
