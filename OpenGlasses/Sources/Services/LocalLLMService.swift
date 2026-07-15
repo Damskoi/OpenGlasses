@@ -100,11 +100,13 @@ final class LocalLLMService: ObservableObject {
 
     /// Known vision model IDs that must load through `VLMModelFactory`.
     ///
-    /// The on-device agent model `gemma-4-e2b-it-4bit` is DELIBERATELY not here: it is a
-    /// text/agentic model that mlx-swift-lm registers in `LLMModelFactory` (the text factory).
-    /// Routing it through the vision factory resolves `model_type: "gemma4"` to `MLXVLM.Gemma4`,
-    /// whose forward pass fatally traps in an uncatchable MLX assertion — the talk-button /
-    /// Field-Assist crash. Loading it as text uses the library's supported Gemma-4 text model.
+    /// `gemma-4-e2b-it-4bit` stays on the TEXT factory. History: the VLM factory used to
+    /// fatally trap on 1-D tokens (talk-button crash); mlx-swift-lm 3.31.4 fixed the trap
+    /// (it now throws catchably) — but a device re-test (2026-07-15) shows this 4-bit
+    /// checkpoint still fails VLM weight mapping: `keyNotFound(language_model…k_norm.weight,
+    /// Gemma4RMSNormZeroShift)` — the community text-quant lacks the VLM export's module
+    /// tree. On-device Gemma vision needs a VLM-exported checkpoint; until one is adopted,
+    /// image turns on this model are refused honestly by the vision guard in LLMService.
     static let visionModelIds: Set<String> = [
         "mlx-community/SmolVLM2-2.2B-Instruct-mlx",
         "mlx-community/SmolVLM2-500M-Video-Instruct-mlx",
@@ -114,6 +116,14 @@ final class LocalLLMService: ObservableObject {
     var isVisionModel: Bool {
         guard let id = loadedModelId else { return false }
         return Self.visionModelIds.contains(id)
+    }
+
+    /// Vision capability by model id (usable before the model is loaded).
+    /// NOTE: mlx-swift-lm 3.31.4 fixed the Gemma-4 VLM forward-pass trap that forced
+    /// `gemma-4-e2b-it-4bit` onto the text factory — re-enabling its vision routing is a
+    /// candidate follow-up, gated on an on-device crash check (talk-button path).
+    nonisolated static func isVisionCapable(modelId: String) -> Bool {
+        visionModelIds.contains(modelId)
     }
 
     // MARK: - Model Management
