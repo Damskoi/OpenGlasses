@@ -960,3 +960,8 @@ final class WakeTapState: @unchecked Sendable {
         for handler in snapshot.forwarders { handler(buffer) }
     }
 }
+
+
+// BS P2: the broadcast's mic source is the same shared tap the video recorder and
+// captions ride — the consumer API already matches; this just names the seam.
+extension WakeWordService: BroadcastAudioProviding {}

@@ -1869,6 +1869,30 @@ struct Config {
         UserDefaults.standard.set(platform, forKey: "broadcastPlatform")
     }
 
+    /// BS P2: broadcast output orientation ("portrait" | "landscape").
+    static var broadcastOrientation: String {
+        UserDefaults.standard.string(forKey: "broadcastOrientation") ?? "portrait"
+    }
+    static func setBroadcastOrientation(_ value: String) {
+        UserDefaults.standard.set(value, forKey: "broadcastOrientation")
+    }
+
+    /// BS P3: starting video source for a broadcast (BroadcastVideoSource rawValue).
+    static var broadcastDefaultSource: String {
+        UserDefaults.standard.string(forKey: "broadcastDefaultSource") ?? "glasses"
+    }
+    static func setBroadcastDefaultSource(_ value: String) {
+        UserDefaults.standard.set(value, forKey: "broadcastDefaultSource")
+    }
+
+    /// BS P3: picture-in-picture dual capture (phone inset over the main source).
+    static var broadcastDualCapture: Bool {
+        UserDefaults.standard.bool(forKey: "broadcastDualCapture")
+    }
+    static func setBroadcastDualCapture(_ value: Bool) {
+        UserDefaults.standard.set(value, forKey: "broadcastDualCapture")
+    }
+
     static var broadcastRTMPURL: String {
         UserDefaults.standard.string(forKey: "broadcastRTMPURL") ?? ""
     }

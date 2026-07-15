@@ -1199,6 +1199,9 @@ class AppState: ObservableObject, AppStateProtocol {
     }
 
     private func setupServiceCallbacks() {
+        // BS P2: broadcast mic audio rides the wake-word shared tap.
+        broadcastService.audioProvider = wakeWordService
+
         // Wire camera debug events to the on-screen debug log
         cameraService.onDebugEvent = { [weak self] message in
             Task { @MainActor in

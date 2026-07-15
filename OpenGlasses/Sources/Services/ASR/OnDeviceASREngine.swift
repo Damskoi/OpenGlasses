@@ -61,10 +61,17 @@ final class OnDeviceASREngine {
     func transcribe(samples: [Float], sampleRate: Double) async throws -> String {
         guard Self.isCompiledIn else { throw ASRError.notCompiledIn }
         guard modelStore.isModelPresent else { throw ASRError.modelUnavailable }
+        // BS P1: effectively-silent audio must not reach the recognizer — this model
+        // family decodes silence as training-corpus boilerplate (and skipping saves the
+        // inference cost).
+        guard TranscriptGuard.passesEnergyGate(samples: samples) else {
+            NSLog("[ASR] Energy gate: buffer is silence — skipping recognition")
+            return ""
+        }
         #if SHERPA_ONNX_ENABLED
         let recog = recognizer ?? SenseVoiceRecognizer(modelDirectory: modelStore.directory)
         recognizer = recog
-        return try await withCheckedThrowingContinuation { continuation in
+        let raw: String = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     continuation.resume(returning: try recog.transcribe(samples: samples, sampleRate: sampleRate))
@@ -73,6 +80,13 @@ final class OnDeviceASREngine {
                 }
             }
         }
+        // BS P1: drop unmistakable artifact shapes (boilerplate, degenerate repetition,
+        // script mismatch vs the configured recognition locale).
+        guard let kept = TranscriptGuard.filter(raw, expectedLocaleIdentifier: Config.speechRecognitionLocale) else {
+            NSLog("[ASR] Artifact filter dropped transcript: %@", String(raw.prefix(60)))
+            return ""
+        }
+        return kept
         #else
         throw ASRError.notCompiledIn
         #endif

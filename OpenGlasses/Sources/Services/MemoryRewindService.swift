@@ -168,7 +168,12 @@ class MemoryRewindService: ObservableObject {
                     return
                 }
                 if let result = result, result.isFinal {
-                    continuation.resume(returning: result.bestTranscription.formattedString)
+                    // BS P1: rolling-buffer audio is mostly ambience — drop unmistakable
+                    // silence-decode artifacts before they read back as "what was said".
+                    let text = TranscriptGuard.filter(
+                        result.bestTranscription.formattedString,
+                        expectedLocaleIdentifier: Config.speechRecognitionLocale) ?? ""
+                    continuation.resume(returning: text)
                 }
             }
         }

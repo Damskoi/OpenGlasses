@@ -246,6 +246,13 @@ class AmbientCaptionService: ObservableObject {
 
     private func finalizeCaption(_ text: String, speaker: Int? = nil) {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        // BS P1: captions feed summaries, the Spotlight index, and Brain — drop
+        // unmistakable silence-decode artifacts regardless of which engine produced them
+        // (the filter is conservative; real speech passes).
+        guard TranscriptGuard.filter(text, expectedLocaleIdentifier: Config.speechRecognitionLocale) != nil else {
+            NSLog("[Captions] Artifact filter dropped caption: %@", String(text.prefix(60)))
+            return
+        }
 
         // Only add if it's meaningfully different from the last finalized text
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

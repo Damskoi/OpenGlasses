@@ -20,6 +20,9 @@ struct ServicesSettingsView: View {
     @State private var broadcastPlatform: String = Config.broadcastPlatform
     @State private var broadcastRTMPURL: String = Config.broadcastRTMPURL
     @State private var broadcastStreamKey: String = Config.broadcastStreamKey
+    @State private var broadcastOrientation: String = Config.broadcastOrientation
+    @State private var broadcastSource: String = Config.broadcastDefaultSource
+    @State private var broadcastDualCapture: Bool = Config.broadcastDualCapture
 
     // Camera
     @State private var cameraResolution: String = Config.cameraResolution
@@ -421,6 +424,28 @@ struct ServicesSettingsView: View {
                 SecretInputField(placeholder: "Stream Key", text: $broadcastStreamKey)
                     .onChange(of: broadcastStreamKey) { _, newValue in
                         Config.setBroadcastStreamKey(newValue)
+                    }
+
+                Picker("Orientation", selection: $broadcastOrientation) {
+                    Text("Portrait").tag("portrait")
+                    Text("Landscape").tag("landscape")
+                }
+                .onChange(of: broadcastOrientation) { _, value in
+                    Config.setBroadcastOrientation(value)
+                }
+
+                Picker("Camera", selection: $broadcastSource) {
+                    ForEach(BroadcastVideoSource.allCases, id: \.rawValue) { source in
+                        Text(source.displayLabel).tag(source.rawValue)
+                    }
+                }
+                .onChange(of: broadcastSource) { _, value in
+                    Config.setBroadcastDefaultSource(value)
+                }
+
+                Toggle("Dual Capture (picture-in-picture)", isOn: $broadcastDualCapture)
+                    .onChange(of: broadcastDualCapture) { _, value in
+                        Config.setBroadcastDualCapture(value)
                     }
             } header: {
                 Text("Live Streaming")
