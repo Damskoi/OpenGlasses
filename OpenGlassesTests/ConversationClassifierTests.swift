@@ -133,8 +133,16 @@ final class ConversationClassifierTests: XCTestCase {
     /// locationContext = nil, the prompt has no USER LOCATION line, and the on-device model
     /// asks "what city are you in?" instead of answering.
     func testWeatherQueriesIncludeLocationSection() {
+        // Contract updated 2026-07-15 (live-traced): BARE weather questions are tier-0
+        // direct get_weather calls now — a 2B local model asked to tool-call stalls in
+        // ever-new phrasings. Weather-ADJACENT questions still reach the LLM with
+        // .location (+ .weather pre-fetch).
+        for query in ["what's the weather", "weather forecast for tomorrow"] {
+            let result = classifier.classify(query)
+            XCTAssertEqual(result.directToolCall?.toolName, "get_weather",
+                           "'\(query)' is a bare weather question — tier-0")
+        }
         let queries = [
-            "what's the weather", "weather forecast for tomorrow",
             "will it rain today", "do i need an umbrella",
             "when is sunset", "how hot is it today",
         ]
@@ -156,7 +164,8 @@ final class ConversationClassifierTests: XCTestCase {
     }
 
     func testToolsSectionIncludedForToolKeywords() {
-        let queries = ["set a timer for 5 minutes", "what's the weather", "remind me tomorrow"]
+        // "what's the weather" moved to tier-0 (see above) — swapped for another tool phrase.
+        let queries = ["set a timer for 5 minutes", "take a note about the meeting", "remind me tomorrow"]
         for query in queries {
             let result = classifier.classify(query)
             XCTAssertTrue(result.relevantSections.contains(.tools),

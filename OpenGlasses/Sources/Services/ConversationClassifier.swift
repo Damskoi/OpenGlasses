@@ -56,6 +56,11 @@ struct ConversationClassifier {
         static let homeAssistant = PromptSections(rawValue: 1 << 6)  // HA entity list (often 1000+ tokens)
         static let playbook      = PromptSections(rawValue: 1 << 7)  // Active playbook steps
         static let social        = PromptSections(rawValue: 1 << 8)  // People/social context
+        /// Weather-decision turn ("do I take a jacket") — the caller pre-fetches
+        /// get_weather into the local prompt. Live-traced: a 2B model asked to *act*
+        /// stalls in endlessly new phrasings ("I can definitely check the forecast for
+        /// you now"); handed the data, it just answers.
+        static let weather       = PromptSections(rawValue: 1 << 9)
 
         // Note: memory (.memory) was removed from this set intentionally.
         // Memory is ALWAYS injected — it's cheap (key-value pairs) and critical for
@@ -139,8 +144,27 @@ struct ConversationClassifier {
             return DirectToolCall(toolName: "device_info", arguments: [:])
         }
 
+        // Weather — get_weather defaults to the current location (and now awaits a GPS fix),
+        // so a bare weather question needs no LLM. Named-place questions ("weather in
+        // Auckland") fail isBareQuery and reach the LLM as before. Added after a live trace:
+        // the 2B local model answered "I'm looking up the weather" WITHOUT emitting the
+        // tool call — deterministic routing beats trusting a small model to act.
+        if let matched = matchedPattern(text, patterns: weatherDirectPatterns), isBareQuery(text, matched: matched) {
+            return DirectToolCall(toolName: "get_weather", arguments: [:])
+        }
+
         return nil
     }
+
+    private let weatherDirectPatterns = ["weather forecast", "forecast", "weather"]
+
+    /// Queries whose answer depends on current/imminent weather. Triggers a get_weather
+    /// pre-fetch for the on-device model (see `.weather`).
+    private let weatherDecisionPatterns = [
+        "weather", "forecast", "rain", "umbrella", "jacket", "coat", "raincoat",
+        "sunscreen", "should i wear", "what should i wear", "warm enough",
+        "how hot", "how cold", "sunny", "windy",
+    ]
 
     /// First pattern the text contains (these groups use no regex patterns).
     private func matchedPattern(_ text: String, patterns: [String]) -> String? {
@@ -159,7 +183,11 @@ struct ConversationClassifier {
     private let fillerWords: Set<String> = [
         "is", "it", "the", "right", "now", "today", "currently", "please",
         "hey", "tell", "me", "do", "i", "have", "left", "my", "on", "at",
-        "moment", "how", "s", "phone"
+        "moment", "how", "s", "phone",
+        // Weather tier-0 ("what is the weather where I am", "what's the weather like
+        // outside"). Additions only widen what counts as bare; anything with real content
+        // words still reaches the LLM.
+        "what", "where", "am", "like", "outside", "here", "tomorrow", "for"
     ]
 
     // MARK: - Tier 1: Prompt Section Detection
@@ -176,6 +204,11 @@ struct ConversationClassifier {
 
         // Location
         if matchesAny(text, patterns: locationPatterns) {
+            sections.insert(.location)
+        }
+
+        if matchesAny(text, patterns: weatherDecisionPatterns) {
+            sections.insert(.weather)
             sections.insert(.location)
         }
 
@@ -288,6 +321,10 @@ struct ConversationClassifier {
         // asks "what city are you in?" instead of answering (or calling get_weather).
         "weather", "forecast", "rain", "umbrella",
         "sunrise", "sunset", "how hot", "how cold",
+        // Clothing decisions are weather questions in disguise ("do I take a jacket") —
+        // live-traced: without USER LOCATION the local model asks where the user is.
+        "jacket", "coat", "raincoat", "sunscreen",
+        "should i wear", "what should i wear", "warm enough",
         // zh — the app ships Chinese presets; English-only patterns dropped these sections
         "天气", "附近", "哪里", "在哪", "导航", "下雨", "预报", "多远"
     ]

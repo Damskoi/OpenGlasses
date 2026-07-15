@@ -183,10 +183,13 @@ class LLMService: ObservableObject {
     /// of the heavy optional contexts (playbook/shortcuts/OpenClaw). `sendLocal` appends its own
     /// reduced tool block, so the model still has usable tools. Used by every on-device path
     /// (active-model `sendMessage` and fast-tier `sendViaLocalAgent`) so they can't diverge.
-    static func leanOnDevicePrompt(locationContext: String?, memoryContext: String?, hasImage: Bool, turn: String) async -> String {
-        let prompt = await buildSystemPrompt(
+    static func leanOnDevicePrompt(locationContext: String?, memoryContext: String?, hasImage: Bool, turn: String, weatherContext: String? = nil) async -> String {
+        var prompt = await buildSystemPrompt(
             locationContext: locationContext, includeTools: false, includeOpenClaw: false,
             hasImage: hasImage, memoryContext: memoryContext, turn: turn)
+        if let weatherContext {
+            prompt += "\n\nCURRENT WEATHER (fetched just now — answer from this; do NOT call get_weather and do NOT say you will check): \(weatherContext)"
+        }
         // Gemma-style templates have no separate system channel — this whole prompt is merged
         // into the model's first *user* turn, and a small model can flip roles and reply to
         // "OpenGlasses" instead of the wearer. Pin the speaker identity explicitly.
@@ -455,6 +458,14 @@ class LLMService: ObservableObject {
         // `sendLocal` appends its own reduced tool block, so the model still has usable tools.
         // Cloud providers get the full tool-laden prompt. (`sendLocal` keeps `includeTools` so it
         // still adds the reduced set — only the PROMPT drops the ~100-tool dump.)
+        // Vision honesty: a non-vision on-device model silently DROPS the image while the
+        // vision prompt block insists "You CAN see images" — the model then invents a scene
+        // (live-traced: described a cup that was never photographed). Refuse instead.
+        if isOnDevice, imageData != nil,
+           provider == .appleOnDevice || !LocalLLMService.isVisionCapable(modelId: modelConfig.model) {
+            return "I can't look at photos with the current on-device model. Switch to a vision-capable local model like SmolVLM, or a cloud model, and try again."
+        }
+
         let fullPrompt: String
         if isOnDevice {
             fullPrompt = await Self.leanOnDevicePrompt(
@@ -2088,6 +2099,67 @@ class LLMService: ObservableObject {
         "where_am_i"
     ]
 
+    /// Parse the local model's `<tool_call>` markup. Extracted (pure) from `sendLocal` so
+    /// the announce-without-action retry can re-parse the corrective generation.
+    nonisolated static func parseLocalToolCall(_ response: String) -> (name: String, args: [String: Any])? {
+        let pattern = #"<tool_call>\s*(\{.*?\})\s*</tool_call>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..., in: response)),
+              let jsonRange = Range(match.range(at: 1), in: response),
+              let data = String(response[jsonRange]).data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["name"] as? String,
+              let args = object["arguments"] as? [String: Any] else {
+            return nil
+        }
+        return (name, args)
+    }
+
+    /// True when the reply narrates an intention to fetch/check something without any
+    /// tool markup — the shape a small model produces instead of acting.
+    nonisolated static func announcesToolIntent(_ response: String) -> Bool {
+        let lowered = response.lowercased()
+        guard !lowered.contains("<tool_call>") else { return false }
+        let intentPhrases = [
+            "looking up", "look that up", "look it up", "let me check", "i'll check",
+            "i will check", "checking the", "let me get", "i'll get", "i'm getting",
+            "fetching", "one moment", "just a moment", "i'm looking",
+        ]
+        return intentPhrases.contains { lowered.contains($0) }
+    }
+
+    /// True when the reply asks the user to supply their location — the model has
+    /// where_am_i available and must never ask (live-traced: "If you tell me your current
+    /// location, I can check the forecast for you").
+    nonisolated static func asksUserForLocation(_ response: String) -> Bool {
+        let lowered = response.lowercased()
+        guard !lowered.contains("<tool_call>") else { return false }
+        let askPhrases = [
+            "your location", "your current location", "where you are",
+            "what city", "which city", "your city", "tell me where",
+            "let me know where", "share your location",
+        ]
+        return askPhrases.contains { lowered.contains($0) }
+    }
+
+    /// The reduced tool block appended to the lean on-device prompt. Extracted (and pure)
+    /// so the location nudge is testable: without it, a small model that has no USER
+    /// LOCATION line answers "I can't find your location" instead of calling `where_am_i`.
+    nonisolated static func localToolInstructions(toolNames: [String]) -> String {
+        guard !toolNames.isEmpty else { return "" }
+        var block = """
+
+        \nTOOLS (use sparingly, only when the user clearly needs one):
+        Output exactly: <tool_call>{"name": "tool_name", "arguments": {"key": "value"}}</tool_call>
+        Available: \(toolNames.joined(separator: ", "))
+        Only use a tool if the user explicitly asks for that action. Otherwise just answer directly.
+        """
+        if toolNames.contains("where_am_i") {
+            block += "\nIf you need the user's location and it isn't given above, call where_am_i — never say you lack location access and never ask the user where they are."
+        }
+        return block
+    }
+
     // Unlike the cloud providers, the on-device path is deliberately NOT on the shared `runToolLoop`
     // driver (Plan BG P3). On-device models don't expose a structured tool-use API — they emit
     // `<tool_call>` markup — so this path is single-shot with a reduced tool set and one optional
@@ -2107,15 +2179,7 @@ class LLMService: ObservableObject {
         var fullPrompt = systemPrompt
         if includeTools, let router = nativeToolRouter {
             let toolNames = router.registry.toolNames.filter { Self.localSafeTools.contains($0) }
-            if !toolNames.isEmpty {
-                fullPrompt += """
-
-                \nTOOLS (use sparingly, only when the user clearly needs one):
-                Output exactly: <tool_call>{"name": "tool_name", "arguments": {"key": "value"}}</tool_call>
-                Available: \(toolNames.joined(separator: ", "))
-                Only use a tool if the user explicitly asks for that action. Otherwise just answer directly.
-                """
-            }
+            fullPrompt += Self.localToolInstructions(toolNames: toolNames)
         }
 
         // Build history — keep only last 2 exchanges for local models (context is precious)
@@ -2141,7 +2205,7 @@ class LLMService: ObservableObject {
         // tool prompt says "use sparingly") case where the model emits a <tool_call>, the preview
         // briefly shows the markup before the cleaned final reply replaces it — acceptable for the
         // common no-tool path, which streams cleanly.
-        let response: String
+        var response: String
         do {
             response = try await localService.generate(
                 userMessage: text,
@@ -2165,15 +2229,33 @@ class LLMService: ObservableObject {
             throw LLMError.invalidResponse("Local model error: \(error.localizedDescription)")
         }
 
-        // Try to parse tool calls — but don't crash if the model doesn't support them well
-        let toolCallPattern = #"<tool_call>\s*(\{.*?\})\s*</tool_call>"#
-        if let regex = try? NSRegularExpression(pattern: toolCallPattern, options: [.dotMatchesLineSeparators]),
-           let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..., in: response)),
-           let jsonRange = Range(match.range(at: 1), in: response),
-           let toolCallData = String(response[jsonRange]).data(using: .utf8),
-           let toolCall = try? JSONSerialization.jsonObject(with: toolCallData) as? [String: Any],
-           let toolName = toolCall["name"] as? String,
-           let toolArgs = toolCall["arguments"] as? [String: Any],
+        // Try to parse tool calls — but don't crash if the model doesn't support them well.
+        var parsedCall = Self.parseLocalToolCall(response)
+
+        // Announce-without-action (live-traced failure): the model says "I'm looking that
+        // up" without emitting the tool_call markup, and the single-shot path would accept
+        // the announcement as the answer. One corrective re-generation demanding the call
+        // (or a direct answer) — bounded, never loops.
+        if parsedCall == nil, includeTools, nativeToolRouter != nil,
+           Self.announcesToolIntent(response) || Self.asksUserForLocation(response) {
+            print("🔁 Local model stalled (announcement/location ask-back) — corrective regen")
+            let correction = Self.asksUserForLocation(response)
+                ? "The user's location is already available to you — never ask for it. Call the where_am_i or get_weather tool now via <tool_call> in the exact format, then answer."
+                : "You said you would look that up, but you did not call a tool. Either output the <tool_call> now in the exact format, or answer directly. Never say you will check — act."
+            var correctiveHistory = history
+            correctiveHistory.append((role: "assistant", content: response))
+            correctiveHistory.append((role: "user", content: correction))
+            if let second = try? await localService.generate(
+                userMessage: correction,
+                systemPrompt: fullPrompt,
+                history: correctiveHistory
+            ) {
+                response = second
+                parsedCall = Self.parseLocalToolCall(response)
+            }
+        }
+
+        if let (toolName, toolArgs) = parsedCall,
            let router = nativeToolRouter {
 
             // Execute the tool
@@ -2258,7 +2340,7 @@ class LLMService: ObservableObject {
     /// Send a message through the on-device agent model (Gemma 4 via MLX).
     /// Used for fast-tier queries when agentic mode is enabled.
     /// Builds its own lightweight prompt and routes through sendLocal().
-    func sendViaLocalAgent(_ text: String, locationContext: String? = nil, memoryContext: String? = nil) async throws -> String {
+    func sendViaLocalAgent(_ text: String, locationContext: String? = nil, memoryContext: String? = nil, weatherContext: String? = nil) async throws -> String {
         let agentModelId = Config.agentModelId
         let hasNativeTools = nativeToolRouter != nil
 
@@ -2288,7 +2370,8 @@ class LLMService: ObservableObject {
             throw LLMError.missingAPIKey("Local LLM service not initialized")
         }
         let leanPrompt = await Self.leanOnDevicePrompt(
-            locationContext: locationContext, memoryContext: memoryContext, hasImage: false, turn: text)
+            locationContext: locationContext, memoryContext: memoryContext, hasImage: false, turn: text,
+            weatherContext: weatherContext)
         if !localService.isModelLoaded || localService.loadedModelId != agentModelId {
             try await localService.loadModel(agentModelId)
         }

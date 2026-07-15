@@ -2508,7 +2508,11 @@ class AppState: ObservableObject, AppStateProtocol {
                             self.cameraService.restoreAudioForWakeWord()
                             print("📸 Photo capture failed: \(error)")
                             self.lastResponse = "Photo failed: \(error.localizedDescription)"
-                            await self.speechService.speak("Sorry, I couldn't take a photo or process the image. \(error.localizedDescription)")
+                            // Speak a human sentence; raw error internals (DecodingError
+                            // paths, model module trees) go to the log only — live-traced:
+                            // TTS once read out "keyNotFound(path: [language_model…".
+                            await self.speechService.speak(
+                                "Sorry, I couldn't take a photo or process the image. \(SpokenErrorPolicy.spokenReason(for: error))")
                         },
                         finish: {
                             self.isProcessing = false
@@ -2791,7 +2795,14 @@ class AppState: ObservableObject, AppStateProtocol {
                 send: { [self] in
                     let rawResponse: String
                     let backgrounded = UIApplication.shared.applicationState == .background
-                    let locationCtx = classification.relevantSections.contains(.location) ? locationService.locationContext : nil
+                    // A location-flavored turn with no fix yet gets a brief one-shot await
+                    // (cold launch / backgrounded when-in-use) instead of a location-less prompt.
+                    let locationCtx: String?
+                    if classification.relevantSections.contains(.location) {
+                        locationCtx = await locationService.awaitLocationContext()
+                    } else {
+                        locationCtx = nil
+                    }
                     let memoryCtx = Config.userMemoryEnabled ? userMemory.systemPromptContext(query: Config.userMemoryRetrievalEnabled ? query : nil) : nil
                     // Cloud send with automatic model fall-over (BK P2b): active model leads, then
                     // the user's fallback order — spills on overflow / rate-limit / empty completion.
@@ -2816,13 +2827,23 @@ class AppState: ObservableObject, AppStateProtocol {
                         )
                     }
                     if useLocalAgent {
+                        // Weather-decision turn ("do I take a jacket"): pre-fetch the forecast
+                        // into the prompt. A 2B model asked to *act* stalls in ever-new
+                        // phrasings (live-traced); handed the data, it just answers. ~200ms,
+                        // local path only — cloud models tool-call fine on their own.
+                        var weatherCtx: String?
+                        if classification.relevantSections.contains(.weather) {
+                            weatherCtx = try? await nativeToolRegistry.executeTool(
+                                name: "get_weather", arguments: [:])
+                        }
                         // Fast path: on-device Gemma 4 agent — but spill to the cloud cascade if it
                         // can't serve the turn (BK P2b: prefer local for cost, fall over to cloud).
                         do {
                             rawResponse = try await llmService.sendViaLocalAgent(
                                 query,
                                 locationContext: locationCtx,
-                                memoryContext: memoryCtx
+                                memoryContext: memoryCtx,
+                                weatherContext: weatherCtx
                             )
                         } catch is CancellationError {
                             throw CancellationError()

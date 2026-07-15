@@ -32,7 +32,7 @@ final class WeatherTool: NativeTool, @unchecked Sendable {
     }
 
     func execute(args: [String: Any]) async throws -> String {
-        let (lat, lon) = resolveCoordinates(args: args)
+        let (lat, lon) = await resolveCoordinates(args: args)
 
         guard let lat, let lon else {
             return "I can't get the weather right now because your location isn't available. Please make sure location services are enabled."
@@ -63,11 +63,14 @@ final class WeatherTool: NativeTool, @unchecked Sendable {
     // MARK: - Private
 
     @MainActor
-    private func resolveCoordinates(args: [String: Any]) -> (Double?, Double?) {
+    private func resolveCoordinates(args: [String: Any]) async -> (Double?, Double?) {
         if let lat = args["latitude"] as? Double, let lon = args["longitude"] as? Double {
             return (lat, lon)
         }
-        if let location = locationService.currentLocation {
+        // A nil fix is usually transient (cold launch, backgrounded when-in-use permission) —
+        // await a fresh one briefly instead of erroring; the model relays this tool's error
+        // verbatim ("location not found") when we give up too fast.
+        if let location = await locationService.awaitFix(timeout: 2.0) {
             return (location.coordinate.latitude, location.coordinate.longitude)
         }
         return (nil, nil)

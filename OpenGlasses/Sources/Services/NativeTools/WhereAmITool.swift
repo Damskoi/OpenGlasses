@@ -19,7 +19,10 @@ final class WhereAmITool: NativeTool, @unchecked Sendable {
     }
 
     func execute(args: [String: Any]) async throws -> String {
-        guard let location = await MainActor.run(body: { locationService.currentLocation }) else {
+        // A nil fix is usually transient (cold launch, backgrounded when-in-use permission) —
+        // request a fresh one and wait briefly instead of giving up immediately.
+        let service = locationService
+        guard let location = await service.awaitFix(timeout: 2.0) else {
             return "I don't have your location right now — make sure location access is enabled."
         }
 

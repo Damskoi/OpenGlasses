@@ -58,6 +58,29 @@ class LocationService: NSObject, ObservableObject {
         }
     }
 
+    /// One-shot fix await: re-kick updates (idempotent) and poll briefly for a location.
+    /// Covers the two nil-fix realities: the first GPS fix after launch takes seconds, and
+    /// when-in-use permission stops updates while the app is backgrounded — a turn that
+    /// needs location shouldn't silently proceed without one when ~a second would get it.
+    func awaitFix(timeout: TimeInterval = 1.5) async -> CLLocation? {
+        if let currentLocation { return currentLocation }
+        guard isAuthorized else { return nil }
+        locationManager.startUpdatingLocation()
+        let deadline = ContinuousClock.now + .seconds(timeout)
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(150))
+            if let currentLocation { return currentLocation }
+        }
+        return nil
+    }
+
+    /// `awaitFix` + the human-readable context string (nil if no fix arrives in time).
+    func awaitLocationContext(timeout: TimeInterval = 1.5) async -> String? {
+        if let context = locationContext { return context }
+        guard await awaitFix(timeout: timeout) != nil else { return nil }
+        return locationContext
+    }
+
     /// Returns a human-readable location string for LLM context
     var locationContext: String? {
         if let geocodedPlace { return geocodedPlace }
