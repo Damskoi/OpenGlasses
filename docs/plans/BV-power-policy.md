@@ -1,0 +1,64 @@
+# Plan BV — Power Policy
+
+**Status: 📋 Planned (2026-07-16).** A battery- and thermal-aware power policy for all-day
+wear, built on one principle: **use the lowest-power combination of sensing, compute and
+networking capable of completing the request.** Today the app has no systematic power
+posture — `batteryLevel` is display-only, the only low-power-mode read is a tool string,
+and presence throttling (Plan W) is the sole load-shedder. Presence decides *whether* a
+loop should work; this plan decides *how expensively* — the two compose, deliberately.
+
+OpenGlasses can do this better than a phone-only app: the DAT SDK exposes **glasses-side
+thermal state** (`deviceStateStream` → `ThermalLevel`), so the policy fuses four signals —
+phone battery (`UIDevice`), phone thermals (`ProcessInfo.thermalState`), glasses battery
+(`GlassesConnectionService.batteryLevel`), glasses thermals (DAT) — plus iOS Low Power
+Mode.
+
+## P1 / PR1 — Policy core (pure, headless)
+
+- `PowerState` (pure fusion): the four signals + low-power flag → one struct; each input
+  optional (glasses absent, battery unknown) with honest defaults.
+- `PowerPolicy` (pure table): `PowerState → PowerPosture` where posture ∈
+  `normal / conserve / reserve`, mirroring Plan W's `ThrottleDecision` shape:
+  - **normal** — no constraint;
+  - **conserve** (battery below threshold on either device, or elevated thermals) —
+    snapshot-before-stream, longer idle teardowns, frame-rate floors raised, prefer the
+    smaller local model tier;
+  - **reserve** (critical battery or serious thermals) — voice-first: camera only on
+    explicit request, no continuous streams without confirmation, heartbeats stretched.
+- Thresholds in `Config` (UserDefaults-backed, code-only knobs — the `frameDedup*`
+  posture), not hard-coded.
+- Tests: fusion with missing inputs, table boundaries, hysteresis (a posture must not
+  flap when a signal hovers at a threshold — enter/exit bands differ).
+
+## P2 / PR2 — Adoption by the spenders
+
+Consumers read one API (`PowerPolicyService.shared.posture` + a change publisher), each
+applying it in its own terms — the service never reaches into features:
+
+- **Camera**: snapshot-first escalation (a visual request tries `latestFrame`/photo
+  before starting a stream); idle stream teardown when nothing consumed frames recently
+  (the keep-streaming consumer set already exists from the Plan BT P2.1 work).
+- **Live modes** (Gemini Live / OpenAI Realtime / BU offline): frame interval raised
+  under `conserve`; session-start confirmation under `reserve`.
+- **Local models**: prefer the smaller tier under thermal pressure; defer opportunistic
+  work (embedding refresh, study-deck generation timing).
+- **Reading companion**: checkpoint interval widened; `conserve` noted in status line.
+- Surfaces a one-line posture explanation for status/tool queries ("conserving — glasses
+  battery 18%").
+
+## Explicitly out of scope
+- Named user-facing profiles (All-Day / Performance) — posture is automatic; profiles can
+  follow once the primitives exist.
+- Killing user-started recordings/broadcasts — user intent outranks posture; those only
+  get the confirmation-before-start treatment under `reserve`.
+
+## Risks / escape hatches
+- Glasses thermal/battery signal availability varies by firmware — every glasses input is
+  optional in the fusion, and phone-only posture must be useful on its own.
+- Over-eager downgrade annoys more than it saves: hysteresis bands + conservative default
+  thresholds; the P-pass on device (with Plan BT's battery measurements) tunes them.
+
+## Verification
+Headless: fusion/table/hysteresis tests + full suite + Release green. Device: a scripted
+drain session comparing posture transitions against logged battery/thermal curves, and a
+hot-day live-session run confirming `conserve` engages before iOS thermal throttling does.
