@@ -108,7 +108,9 @@ struct Config {
         if let phrase = UserDefaults.standard.string(forKey: "wakePhrase"), !phrase.isEmpty {
             return phrase.lowercased()
         }
-        return "hey openglasses"
+        // No "hey" prefix: matching is substring-based, so the bare name also catches anyone
+        // who still says "hey openglasses" — one default covers both habits.
+        return "openglasses"
     }
 
     static func setWakePhrase(_ phrase: String) {
@@ -142,6 +144,11 @@ struct Config {
             return ["hey ray ban", "hey ray-ban", "hey raven", "hey rayben", "hey ray band"]
         case "hey openglasses":
             return ["hey open glasses", "hey open glass", "hey openclass", "hey open class", "hey openglass"]
+        case "openglasses":
+            // Hey-less default. Alternates cover the recognizer splitting the compound; the
+            // riskier "open class(es)" misrecognitions are NOT included here — without the
+            // "hey" anchor they'd false-trigger on ordinary speech.
+            return ["open glasses", "openglass", "open glass"]
         default:
             return []
         }
@@ -471,7 +478,7 @@ struct Config {
     // MARK: - Custom System Prompt
 
     static let defaultSystemPrompt = """
-    You are OpenGlasses, a voice assistant running on Ray-Ban Meta smart glasses. Your responses will be spoken aloud via text-to-speech. Your name is OpenGlasses and the user activates you by saying "Hey OpenGlasses".
+    You are OpenGlasses, a voice assistant running on Ray-Ban Meta smart glasses. Your responses will be spoken aloud via text-to-speech. Your name is OpenGlasses and the user activates you by saying "OpenGlasses".
 
     RESPONSE STYLE:
     - Keep responses CONCISE but COMPLETE — typically 2-4 sentences, longer for complex topics.

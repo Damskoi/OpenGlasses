@@ -61,6 +61,18 @@ final class LocalLocationFixTests: XCTestCase {
                        "a reply that DID emit the call is not an empty announcement")
     }
 
+    /// Live-traced (Samoa/travel-guide): a search-flavoured announcement — "I will now search
+    /// for popular tourist destinations in Samoa for you" — matched no intent phrase, so the
+    /// corrective regen never fired and the promise was spoken as the final answer.
+    func testSearchAnnouncementsDetected() {
+        XCTAssertTrue(LLMService.announcesToolIntent(
+            "I apologize, I should have used a tool to get that information. I will now search for popular tourist destinations in Samoa for you."))
+        XCTAssertTrue(LLMService.announcesToolIntent("Let me search for that."))
+        XCTAssertTrue(LLMService.announcesToolIntent("Searching for current exchange rates now."))
+        XCTAssertFalse(LLMService.announcesToolIntent("You can search for cheap flights on several comparison sites."),
+                       "mentioning that the USER can search is an answer, not an announcement")
+    }
+
     func testClothingDecisionsClassifyAsLocationQuestions() {
         for query in ["do i take a jacket", "should i wear a coat today", "is it warm enough for shorts"] {
             let result = classifier.classify(query)
@@ -99,8 +111,11 @@ final class LocalLocationFixTests: XCTestCase {
 
     func testVisionCapabilityByModelId() {
         XCTAssertTrue(LocalLLMService.isVisionCapable(modelId: "mlx-community/SmolVLM2-2.2B-Instruct-mlx"))
-        XCTAssertFalse(LocalLLMService.isVisionCapable(modelId: "mlx-community/gemma-4-e2b-it-4bit"),
-                       "device-retested 2026-07-15: the 4-bit checkpoint fails VLM weight mapping (keyNotFound k_norm) — image turns refuse honestly instead")
+        // Attempt-and-demote (2026-07-16): Gemma 4 is nominally vision-capable and ATTEMPTS the
+        // VLM factory; if this build's weights fail VLM mapping it demotes to text at runtime
+        // (`isVisionUsable` is the demotion-aware truth, and image turns refuse honestly).
+        XCTAssertTrue(LocalLLMService.isVisionCapable(modelId: "mlx-community/gemma-4-e2b-it-4bit"),
+                      "nominal capability — runtime demotion (visionDemotedModelIds) handles load failure")
     }
 
     func testCurrentDateTimeLineFormat() {

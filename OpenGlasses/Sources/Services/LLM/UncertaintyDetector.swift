@@ -24,6 +24,12 @@ struct UncertaintyVerdict: Equatable {
 enum UncertaintyDetector {
 
     static func assess(question: String, answer: String) -> UncertaintyVerdict {
+        // The web can never answer a question about the user's own data — a re-ask there
+        // produces the worst possible reply ("Checked the web — I don't have access to your
+        // personal calendar", live-traced). Personal-data questions are the tools' job.
+        if isPersonalDataQuestion(normalize(question)) {
+            return .confident
+        }
         // Freshness wins the reported reason when both signals trip.
         if asksForVolatileData(normalize(question)) {
             return UncertaintyVerdict(shouldSearch: true, reason: .freshnessRequested)
@@ -33,6 +39,23 @@ enum UncertaintyDetector {
         }
         return .confident
     }
+
+    /// True when the question is about the user's own on-device data — calendar, reminders,
+    /// alarms, health, battery — which no web search can see.
+    static func isPersonalDataQuestion(_ question: String) -> Bool {
+        personalDataPatterns.contains { pattern in
+            question.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private static let personalDataPatterns: [String] = [
+        #"\bmy (calendar|schedule|agenda|appointments?|meetings?|events?)\b"#,
+        #"\b(in|on) the calendar\b"#,
+        #"\bmy (reminders?|alarms?|timers?)\b"#,
+        #"\bmy (steps?|step count|heart rate|workouts?)\b"#,
+        #"\bmy (battery|phone|device)\b"#,
+        #"\bam i free\b"#,
+    ]
 
     // MARK: - Signals
 

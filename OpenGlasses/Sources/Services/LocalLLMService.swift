@@ -36,9 +36,36 @@ final class LocalLLMService: ObservableObject {
     /// HubClient configured to store models in Application Support (persistent, not purgeable).
     private let hub: HubClient = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let modelsDir = appSupport.appendingPathComponent("LocalModels", isDirectory: true)
+        var modelsDir = appSupport.appendingPathComponent("LocalModels", isDirectory: true)
         try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+
+        // Multi-GB re-downloadable weights must not ride along in iCloud backups (they bloat the
+        // user's backup and iOS review flags re-fetchable data that isn't excluded).
+        var noBackup = URLResourceValues()
+        noBackup.isExcludedFromBackup = true
+        try? modelsDir.setResourceValues(noBackup)
+
+        // Once per process, never per instance: throwaway LocalLLMService() constructions
+        // (e.g. a view listing downloaded models) must not re-run the sweep while the primary
+        // service has a download in flight — its live safetensors IS a CFNetworkDownload temp.
+        _ = LocalLLMService.sweepOrphanedDownloadTempsOnce
+
         return HubClient(cache: HubCache(cacheDirectory: modelsDir))
+    }()
+
+    /// Sweep orphaned download temps: an interrupted multi-GB pull strands its
+    /// CFNetworkDownload_*.tmp in the sandbox tmp dir (several GB observed in the field).
+    /// Static-once: at FIRST touch in a process no download can be in flight, so everything
+    /// matching is garbage; later touches (new instances) are no-ops.
+    private static let sweepOrphanedDownloadTempsOnce: Void = {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        guard let items = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: [.fileSizeKey]) else { return }
+        var freed: Int64 = 0
+        for item in items where item.lastPathComponent.hasPrefix("CFNetworkDownload_") {
+            freed += Int64((try? item.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            try? FileManager.default.removeItem(at: item)
+        }
+        if freed > 0 { NSLog("🧹 LocalLLM: swept %lld MB of orphaned download temps", freed / 1_048_576) }
     }()
 
     // MARK: - Recommended Models
@@ -51,8 +78,17 @@ final class LocalLLMService: ObservableObject {
             estimatedSize: "3.6 GB",
             hasVision: true,
             hasToolCalling: true,
-            notes: "Best on-device agent — vision, tool calling, 140+ languages. Uses ~4 GB while running; close other apps if it refuses to load.",
+            notes: "Best on-device agent — tool calling, 140+ languages. Vision-ready architecture, but this build's vision weights don't load in the current MLX runtime (device-verified 2026-07-16) — photo questions answer text-only until a fixed build lands, then vision enables automatically. Uses ~4 GB while running.",
             minimumRAMGB: 8
+        ),
+        RecommendedModel(
+            id: "mlx-community/gemma-4-e4b-it-4bit",
+            name: "Gemma 4 E4B (Agent+)",
+            estimatedSize: "5.1 GB",
+            hasVision: true,
+            hasToolCalling: true,
+            notes: "Bigger Gemma 4 — highest-quality on-device agent. Same vision caveat as E2B (text-only until an MLX runtime fix). Needs a high-memory device (12 GB).",
+            minimumRAMGB: 12
         ),
         // Vision models (can see photos from glasses)
         RecommendedModel(
@@ -80,14 +116,9 @@ final class LocalLLMService: ObservableObject {
             hasToolCalling: true,
             notes: "Strong reasoning and tool use"
         ),
-        RecommendedModel(
-            id: "mlx-community/gemma-2-2b-it-4bit",
-            name: "Gemma 2 2B",
-            estimatedSize: "1.5 GB",
-            hasVision: false,
-            hasToolCalling: true,
-            notes: "Good balance of size and quality"
-        ),
+        // (Gemma 2 2B was retired from this list in favor of the Gemma 4 pair above —
+        // vision + tools at comparable footprints. Already-downloaded copies keep working:
+        // loading is by id, and its LocalModelBudget entry remains.)
         RecommendedModel(
             id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
             name: "Qwen 2.5 0.5B",
@@ -98,32 +129,48 @@ final class LocalLLMService: ObservableObject {
         ),
     ]
 
-    /// Known vision model IDs that must load through `VLMModelFactory`.
+    /// Model IDs whose checkpoints declare a vision tree, attempted through `VLMModelFactory`.
     ///
-    /// `gemma-4-e2b-it-4bit` stays on the TEXT factory. History: the VLM factory used to
-    /// fatally trap on 1-D tokens (talk-button crash); mlx-swift-lm 3.31.4 fixed the trap
-    /// (it now throws catchably) — but a device re-test (2026-07-15) shows this 4-bit
-    /// checkpoint still fails VLM weight mapping: `keyNotFound(language_model…k_norm.weight,
-    /// Gemma4RMSNormZeroShift)` — the community text-quant lacks the VLM export's module
-    /// tree. On-device Gemma vision needs a VLM-exported checkpoint; until one is adopted,
-    /// image turns on this model are refused honestly by the vision guard in LLMService.
+    /// Gemma 4 history: the VLM factory used to fatally trap on 1-D tokens (talk-button
+    /// crash); mlx-swift-lm 3.31.4 made that catchable — but a device test (2026-07-15)
+    /// showed the e2b 4-bit quant failing VLM weight mapping (`keyNotFound(language_model…
+    /// k_norm.weight, Gemma4RMSNormZeroShift)`). The hub configs for all three Gemma 4
+    /// checkpoints declare `Gemma4ForConditionalGeneration` with a `vision_config`
+    /// (verified 2026-07-16), so vision is *attempted* — and a mapping failure now demotes
+    /// gracefully to the text factory (`loadModel`), with image turns refused honestly by
+    /// the vision guard in LLMService. Nothing regresses if a checkpoint doesn't cooperate.
     static let visionModelIds: Set<String> = [
         "mlx-community/SmolVLM2-2.2B-Instruct-mlx",
         "mlx-community/SmolVLM2-500M-Video-Instruct-mlx",
+        "mlx-community/gemma-4-e2b-it-4bit",
+        "mlx-community/gemma-4-E2B-it-4bit",
+        "mlx-community/gemma-4-e4b-it-4bit",
     ]
 
-    /// Whether the currently loaded model supports vision.
-    var isVisionModel: Bool {
-        guard let id = loadedModelId else { return false }
-        return Self.visionModelIds.contains(id)
-    }
+    /// Models whose VLM load failed weight mapping this run and were demoted to the text
+    /// factory. In-memory: a re-uploaded checkpoint gets a fresh chance next launch.
+    private(set) var visionDemotedModelIds: Set<String> = []
 
-    /// Vision capability by model id (usable before the model is loaded).
-    /// NOTE: mlx-swift-lm 3.31.4 fixed the Gemma-4 VLM forward-pass trap that forced
-    /// `gemma-4-e2b-it-4bit` onto the text factory — re-enabling its vision routing is a
-    /// candidate follow-up, gated on an on-device crash check (talk-button path).
+    /// True when the LOADED model went through `VLMModelFactory` — the single source of
+    /// truth for everything factory-dependent (token batch shape, image input). Must track
+    /// the factory that actually succeeded, not the id's nominal capability: a demoted
+    /// Gemma fed a (1, L) batch dies in the text factory's chunked prefill (uncatchable).
+    private(set) var loadedViaVLMFactory = false
+
+    /// Whether the currently loaded model supports vision (as actually loaded).
+    var isVisionModel: Bool { isModelLoaded && loadedViaVLMFactory }
+
+    /// Vision capability by model id — architectural claim, usable before load.
     nonisolated static func isVisionCapable(modelId: String) -> Bool {
         visionModelIds.contains(modelId)
+    }
+
+    /// Vision usability by model id, demotion-aware. Prefer this over the static check
+    /// when a service instance is in hand: after a VLM→text demotion the architectural
+    /// claim is true but images would be silently dropped.
+    func isVisionUsable(modelId: String) -> Bool {
+        if loadedModelId == modelId, isModelLoaded { return loadedViaVLMFactory }
+        return Self.visionModelIds.contains(modelId) && !visionDemotedModelIds.contains(modelId)
     }
 
     // MARK: - Model Management
@@ -139,11 +186,36 @@ final class LocalLLMService: ObservableObject {
         isDownloading = true
         downloadingModelId = modelId
         downloadProgress = 0
+        // A multi-GB pull dies when iOS auto-locks the screen (the app suspends and the transfer
+        // is torn down), so keep the display awake for the duration. Restored in the defer on
+        // every exit path — completion, cancel, or error. No other feature owns this flag.
+        UIApplication.shared.isIdleTimerDisabled = true
         defer {
+            UIApplication.shared.isIdleTimerDisabled = false
             isDownloading = false
             downloadingModelId = nil
             activeDownloadTask = nil
         }
+
+        // The hub's progress callback is per-FILE (a fresh 0→1 fraction each file), and a model
+        // is mostly one giant safetensors — so the fraction sits at 0 for the whole pull, then
+        // jumps to done. For catalog models (known expected size) poll the bytes actually on
+        // disk instead, as the SINGLE progress writer; unknown/custom ids keep the hub fraction.
+        let expectedBytes = Self.expectedDownloadBytes(for: modelId)
+        let downloadStart = Date()
+        var progressPoller: Task<Void, Never>?
+        if let expectedBytes, expectedBytes > 0 {
+            progressPoller = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let bytes = self.onDiskDownloadBytes(for: modelId, since: downloadStart)
+                    let est = min(0.99, Double(bytes) / Double(expectedBytes))
+                    if est > self.downloadProgress { self.downloadProgress = est }   // monotonic
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                }
+            }
+        }
+        defer { progressPoller?.cancel() }
 
         // BK P5: own the cancellable unit. Before, the real Task lived in the caller and
         // `activeDownloadTask` was permanently nil, so `cancelDownload()` cancelled nothing and
@@ -158,7 +230,9 @@ final class LocalLLMService: ObservableObject {
                     throw LocalLLMError.generationFailed("Invalid model id: \(modelId)")
                 }
                 _ = try await self.hub.downloadSnapshot(of: repoID) { @MainActor progress in
-                    self.downloadProgress = progress.fractionCompleted
+                    // Single-writer rule: when the byte poller runs, the per-file fraction is
+                    // noise (it thrashes 1%↔99%); only unknown-size models use it.
+                    if expectedBytes == nil { self.downloadProgress = progress.fractionCompleted }
                 }
             }
         }
@@ -182,6 +256,7 @@ final class LocalLLMService: ObservableObject {
         isDownloading = false
         downloadingModelId = nil
         downloadProgress = 0
+        UIApplication.shared.isIdleTimerDisabled = false   // belt-and-braces with downloadModel's defer
     }
 
     /// Load an already-downloaded model into memory.
@@ -234,23 +309,44 @@ final class LocalLLMService: ObservableObject {
         Memory.cacheLimit = 20 * 1024 * 1024
 
         let config = ModelConfiguration(id: modelId)
-        let factory: any ModelFactory = Self.visionModelIds.contains(modelId)
-            ? VLMModelFactory.shared
-            : LLMModelFactory.shared
-
-        modelContainer = try await factory.loadContainer(
-            from: #hubDownloader(hub),
-            using: #huggingFaceTokenizerLoader(),
-            configuration: config
-        ) { progress in
-            Task { @MainActor in
-                self.downloadProgress = progress.fractionCompleted
+        func load(with factory: any ModelFactory) async throws -> ModelContainer {
+            try await factory.loadContainer(
+                from: #hubDownloader(hub),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: config
+            ) { progress in
+                Task { @MainActor in
+                    self.downloadProgress = progress.fractionCompleted
+                }
             }
+        }
+
+        let wantsVision = Self.visionModelIds.contains(modelId)
+            && !visionDemotedModelIds.contains(modelId)
+        if wantsVision {
+            do {
+                modelContainer = try await load(with: VLMModelFactory.shared)
+                loadedViaVLMFactory = true
+            } catch {
+                // The known shape of this failure is a quant whose weight tree doesn't
+                // match the VLM export (keyNotFound …k_norm.weight — device trace
+                // 2026-07-15). Whatever the cause, the model is still a perfectly good
+                // text model: demote for this run and load through the text factory.
+                // Image turns then get the honest refusal instead of a broken load.
+                NSLog("[LocalLLM] VLM load failed for %@ — demoting to text factory: %@",
+                      modelId, error.localizedDescription)
+                visionDemotedModelIds.insert(modelId)
+                modelContainer = try await load(with: LLMModelFactory.shared)
+                loadedViaVLMFactory = false
+            }
+        } else {
+            modelContainer = try await load(with: LLMModelFactory.shared)
+            loadedViaVLMFactory = false
         }
 
         loadedModelId = modelId
         isModelLoaded = true
-        print("✅ Local model loaded: \(modelId) (vision: \(Self.visionModelIds.contains(modelId)))")
+        print("✅ Local model loaded: \(modelId) (vision: \(loadedViaVLMFactory))")
     }
 
     /// Unload model from memory.
@@ -259,6 +355,7 @@ final class LocalLLMService: ObservableObject {
         modelContainer = nil
         loadedModelId = nil
         isModelLoaded = false
+        loadedViaVLMFactory = false
         if hadModel {
             // Return MLX's recycled evaluation buffers to the OS — without this, Unload
             // frees the weights but leaves the buffer cache resident. Guarded so a
@@ -271,10 +368,15 @@ final class LocalLLMService: ObservableObject {
     // MARK: - Generation
 
     /// Generate a text response from the local model.
+    /// - Parameter imageData: an image for the turn (VLM models only). Honored only when the
+    ///   loaded model actually went through the VLM factory; the vision guard in LLMService
+    ///   refuses image turns upstream otherwise, so a non-nil image here with a text-factory
+    ///   model is a caller bug — logged and ignored rather than crashed on.
     func generate(
         userMessage: String,
         systemPrompt: String,
         history: [(role: String, content: String)] = [],
+        imageData: Data? = nil,
         onToken: ((String) -> Void)? = nil
     ) async throws -> String {
         // On-device inference runs on the GPU via Metal, which iOS forbids in the
@@ -298,6 +400,25 @@ final class LocalLLMService: ObservableObject {
 
         isGenerating = true
         defer { isGenerating = false }
+
+        // Image turn (P: local vision): route through the VLM processor, which owns the
+        // model's own chat template and image tokenization — the manual tokenize path below
+        // has no way to interleave image tokens.
+        if let imageData {
+            if loadedViaVLMFactory {
+                return try await generateVisionTurn(
+                    userMessage: userMessage, systemPrompt: systemPrompt,
+                    history: history, imageData: imageData,
+                    container: container, onToken: onToken)
+            }
+            // Reachable despite the upstream guard: the first-ever photo question loads the
+            // model DURING the turn, and the VLM→text demotion happens after the guard already
+            // passed. Refuse honestly — silently answering text-only about an image the model
+            // never saw is the exact hallucination the vision guard exists to prevent.
+            NSLog("[LocalLLM] Image supplied to a text-factory model (%@) — refusing honestly",
+                  loadedModelId ?? "?")
+            return Self.visionWeightsUnavailableMessage
+        }
 
         // Tokenize a candidate history exactly as the model will — chat template, with the
         // no-system-role fallback some small models need. Used both to measure truncation
@@ -347,7 +468,9 @@ final class LocalLLMService: ObservableObject {
         // - Vision models (VLMModelFactory, e.g. SmolVLM2/Idefics3) skip that chunked
         //   prepare and feed the tokens to the language model in one shot, so they need the
         //   explicit (1, L) batch axis (their forward pass indexes dim(2)).
-        let tokenIDs = Self.tokenBatch(tokens, isVisionModel: Self.visionModelIds.contains(loadedModelId ?? ""))
+        // Keyed off the factory that ACTUALLY loaded the model, never the id's nominal
+        // capability — after a VLM→text demotion, a (1, L) batch here is the fatal crash.
+        let tokenIDs = Self.tokenBatch(tokens, isVisionModel: loadedViaVLMFactory)
         // NSLog (not print) so it survives a fatal MLX crash in the unified log,
         // confirming what shape reaches the model.
         NSLog("🔬 LocalLLM.generate model=%@ tokenIDs.shape=%@ count=%d", loadedModelId ?? "?", "\(tokenIDs.shape)", tokens.count)
@@ -394,6 +517,68 @@ final class LocalLLMService: ObservableObject {
         NSLog("🔬 LocalLLM.generate done — mlx active=%dMB cache=%dMB, app footprint=%dMB",
               Memory.activeMemory / 1_048_576, Memory.cacheMemory / 1_048_576,
               Int(MemoryHeadroom.appFootprintBytes() / 1_048_576))
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// One image turn through a VLM-factory model. The processor owns the chat template and
+    /// image tokenization; history is kept short (image tokens are big) and un-budgeted — the
+    /// processor's own encoding is the authority on how many tokens the image costs.
+    private func generateVisionTurn(
+        userMessage: String,
+        systemPrompt: String,
+        history: [(role: String, content: String)],
+        imageData: Data,
+        container: ModelContainer,
+        onToken: ((String) -> Void)?
+    ) async throws -> String {
+        guard let ciImage = CIImage(data: imageData) else {
+            throw LocalLLMError.generationFailed("Couldn't decode the photo.")
+        }
+
+        var chat: [Chat.Message] = [.system(systemPrompt)]
+        for turn in history.suffix(4) {
+            chat.append(turn.role == "assistant" ? .assistant(turn.content) : .user(turn.content))
+        }
+        chat.append(.user(userMessage, images: [.ciImage(ciImage)]))
+        // 896² is Gemma's native vision resolution and a sane cap for every supported VLM —
+        // a full-resolution glasses photo through the image pipeline is a pure memory spike.
+        let userInput = UserInput(chat: chat,
+                                  processing: .init(resize: CGSize(width: 896, height: 896)))
+        let parameters = GenerateParameters(maxTokens: 512, temperature: 0.7, topP: 0.9)
+
+        // Same mid-generation backgrounding watch as the text path (Metal in the background
+        // is an uncatchable kill) — but the drain runs inside `container.perform`, OFF the
+        // main actor, so the flag must be a lock-guarded box rather than this actor's
+        // property (and UIApplication can't be re-read there; the entry pre-check plus the
+        // notification cover it).
+        let backgroundedFlag = LockedFlag()
+        let bgObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            backgroundedFlag.set()
+        }
+        defer { NotificationCenter.default.removeObserver(bgObserver) }
+
+        NSLog("🔬 LocalLLM.generateVisionTurn model=%@ image=%dKB", loadedModelId ?? "?", imageData.count / 1024)
+        let output = try await container.perform { context -> String in
+            let lmInput = try await context.processor.prepare(input: userInput)
+            let stream = try MLXLMCommon.generate(input: lmInput, parameters: parameters, context: context)
+            var iterator = stream.makeAsyncIterator()
+            return try await Self.drainTokenStream(
+                nextChunk: {
+                    while let generation = await iterator.next() {
+                        if case .chunk(let text) = generation { return text }
+                    }
+                    return nil
+                },
+                isBackgrounded: { backgroundedFlag.isSet },
+                onToken: onToken
+            )
+        }
+        NSLog("🔬 LocalLLM.generateVisionTurn done — mlx active=%dMB cache=%dMB",
+              Memory.activeMemory / 1_048_576, Memory.cacheMemory / 1_048_576)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -459,6 +644,40 @@ final class LocalLLMService: ObservableObject {
     /// Get size of a downloaded model on disk.
     func modelSizeOnDisk(_ modelId: String) -> Int64 {
         directorySize(modelPath(modelId))
+    }
+
+    /// Spoken/shown when an image reaches a model whose VLM load was demoted to text-only.
+    /// Single source — LLMService's pre-flight guard and the in-generation net both return it.
+    static let visionWeightsUnavailableMessage =
+        "This model's vision weights couldn't load on this device, so it's running text-only. For photos, switch to SmolVLM2 or a cloud model."
+
+    /// Expected full-snapshot size for a catalog model (parsed from its `estimatedSize`), or nil
+    /// for custom/unknown ids. Drives the byte-based download progress estimate.
+    static func expectedDownloadBytes(for modelId: String) -> Int64? {
+        guard let est = recommendedModels.first(where: { $0.id == modelId })?.estimatedSize else { return nil }
+        let cleaned = est.uppercased()
+            .replacingOccurrences(of: "GB", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard let gb = Double(cleaned), gb > 0 else { return nil }
+        return Int64(gb * 1_073_741_824)
+    }
+
+    /// Bytes on disk attributable to an in-progress download: the partial snapshot plus
+    /// CFNetwork's in-flight temp files (where the big safetensors grows until completion).
+    /// Only temps created after `start` count — a stale orphan would jump the bar to 99%.
+    private func onDiskDownloadBytes(for modelId: String, since start: Date) -> Int64 {
+        var total = modelSizeOnDisk(modelId)
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        if let items = try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: [.creationDateKey, .fileSizeKey]
+        ) {
+            for item in items where item.lastPathComponent.hasPrefix("CFNetworkDownload_") {
+                let values = try? item.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
+                let created = values?.creationDate ?? .distantPast
+                if created >= start { total += Int64(values?.fileSize ?? 0) }
+            }
+        }
+        return total
     }
 
     /// Delete a downloaded model.
@@ -562,16 +781,45 @@ struct RecommendedModel: Identifiable {
         self.minimumRAMGB = minimumRAMGB
     }
 
-    /// Whether the current device has enough RAM to run this model.
+    /// Whether the current device has enough RAM to run this model. Compared against the
+    /// *marketing* RAM size, not raw `physicalMemory`: a 12 GB device reports ~11.5 GB
+    /// (carve-outs), so a raw `>= 12` check blocked exactly the hardware it was meant to
+    /// allow.
     var isCompatibleWithDevice: Bool {
         guard minimumRAMGB > 0 else { return true }
-        return LocalLLMService.deviceRAMGB >= minimumRAMGB
+        return LocalLLMService.marketingRAMGB >= minimumRAMGB
     }
 }
 
 extension LocalLLMService {
-    /// Physical RAM of this device in GB.
+    /// Physical RAM of this device in GB, as reported (always a little under the marketing
+    /// number).
     nonisolated static var deviceRAMGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+    }
+
+    /// The device's nominal RAM size: reported physical memory rounded UP to the next whole
+    /// GB. Physical always underreports marketing by under a gigabyte, so the ceiling
+    /// recovers the number on the box (11.5 → 12, 7.4 → 8) without ever inflating a smaller
+    /// device into a larger tier.
+    nonisolated static var marketingRAMGB: Double {
+        deviceRAMGB.rounded(.up)
+    }
+}
+
+/// A lock-guarded one-way boolean, settable from any thread — the mid-generation backgrounding
+/// signal for vision turns, whose token drain runs off the main actor inside `container.perform`.
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock(); defer { lock.unlock() }
+        value = true
     }
 }

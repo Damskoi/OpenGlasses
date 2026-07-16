@@ -45,7 +45,7 @@ struct OnboardingOverlay: View {
                         number: 3,
                         icon: "mic",
                         title: "Say Your Wake Word",
-                        subtitle: "Say \"Hey OpenGlasses\" to start a conversation."
+                        subtitle: "Say \"OpenGlasses\" to start a conversation."
                     )
                 }
                 .padding(.horizontal, 24)

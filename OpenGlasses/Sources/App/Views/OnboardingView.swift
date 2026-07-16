@@ -903,7 +903,7 @@ struct OnboardingView: View {
                     .font(.title.weight(.bold))
                     .foregroundStyle(.white)
 
-                Text("Say \"Hey OpenGlasses\" or tap the mic to start a conversation.")
+                Text("Say \"OpenGlasses\" or tap the mic to start a conversation.")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.6))
                     .multilineTextAlignment(.center)

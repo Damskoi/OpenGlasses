@@ -25,7 +25,7 @@ A source-available voice-powered AI assistant for Ray-Ban and Oakley Meta smart 
 2. **Build on your iPhone** from Xcode (⌘R) — set signing team if prompted
 3. Add an AI model in **Settings → AI Models** (Anthropic, OpenAI, Gemini, or a local model)
 4. Pair your Ray-Ban or Oakley Meta glasses via the Meta AI app
-5. Say **"Hey OpenGlasses"** and ask anything
+5. Say **"OpenGlasses"** and ask anything
 
 ---
 

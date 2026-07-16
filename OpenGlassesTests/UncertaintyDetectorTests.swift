@@ -47,6 +47,36 @@ final class UncertaintyDetectorTests: XCTestCase {
         XCTAssertEqual(verdict, .confident)
     }
 
+    // MARK: - Personal-data questions never reach the web
+
+    /// Live-traced: "do I have anything in my calendar for Friday" hedged ("I don't have
+    /// access…") and the gate sent it to WEB SEARCH — "Checked the web — I don't have access
+    /// to your personal calendar" is the worst possible reply. The user's own data is the
+    /// tools' job; the gate must stand down even when freshness words ("today") appear.
+    func testPersonalDataQuestionsNeverSearch() {
+        let questions = [
+            "do i have anything in my calendar for tomorrow",
+            "what's on my schedule today",
+            "do i have anything on the calendar this week",
+            "what are my reminders",
+            "how's my battery today",
+            "am i free tomorrow",
+        ]
+        for question in questions {
+            let verdict = UncertaintyDetector.assess(
+                question: question,
+                answer: "I don't have access to your personal calendar.")
+            XCTAssertFalse(verdict.shouldSearch, "the web can't see the user's own data: \(question)")
+        }
+    }
+
+    func testNonPersonalQuestionsStillTrip() {
+        let verdict = UncertaintyDetector.assess(
+            question: "what's the exchange rate today",
+            answer: "It's definitely X.")
+        XCTAssertTrue(verdict.shouldSearch, "the personal-data guard must not over-block")
+    }
+
     // MARK: - Freshness-sensitive questions
 
     func testFreshQuestionsTripEvenWithConfidentAnswers() {

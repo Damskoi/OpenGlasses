@@ -9,7 +9,9 @@ struct StatusIndicator: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var session: GeminiLiveSessionManager
     @ObservedObject var openAISession: OpenAIRealtimeSessionManager
+    @ObservedObject var openClawBridge: OpenClawBridge
     @Environment(\.appAccent) private var accent
+    @State private var showDisconnectConfirm = false
 
     private var isGemini: Bool { appState.currentMode == .geminiLive }
     private var isOpenAI: Bool { appState.currentMode == .openaiRealtime }
@@ -38,7 +40,7 @@ struct StatusIndicator: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(statusLabel)
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .foregroundStyle(Color(.label))
                         .lineLimit(1)
 
@@ -82,14 +84,82 @@ struct StatusIndicator: View {
                 reconnectingLabel.padding(.bottom, 10)
             }
 
-            // Active mode indicator
-            activeModeBadge
-                .padding(.bottom, 12)
+            // Bottom row: active mode + the connection pills (formerly a separate band above
+            // the card — merged here so the home screen is one status surface, not two).
+            HStack(spacing: 8) {
+                activeModeBadge
+                Spacer()
+                glassesPill
+                if Config.isOpenClawConfigured {
+                    openClawPill
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
         }
         .glassEffect(in: .rect(cornerRadius: 16))
         .padding(.horizontal, 20)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(statusLabel). \(modeLabel). \(appState.isConnected ? "Connected" : "Disconnected")")
+    }
+
+    // MARK: - Connection pills (merged from the old StatusPillsRow)
+
+    private var glassesPill: some View {
+        let connected = appState.isConnected
+        let color: Color = connected ? .green : .red.opacity(0.7)
+        let label = connected ? (appState.glassesService.deviceName ?? "Glasses") : "Disconnected"
+
+        return Button {
+            if connected {
+                showDisconnectConfirm = true
+            } else {
+                Task { await appState.glassesService.connect() }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                LogoIcon(size: 13)
+                    .foregroundStyle(color)
+                if connected {
+                    Circle().fill(color).frame(width: 5, height: 5)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .glassEffect(in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .confirmationDialog("Disconnect Glasses", isPresented: $showDisconnectConfirm) {
+            Button("Disconnect", role: .destructive) {
+                appState.disconnectGlasses()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stop mic, camera, and TTS. Gateway tasks keep running.")
+        }
+        .accessibilityLabel("Glasses: \(label)")
+    }
+
+    private var openClawPill: some View {
+        let (color, label): (Color, String) = {
+            switch openClawBridge.connectionState {
+            case .connected: return (.green, "Connected")
+            case .checking: return (.orange, "Checking")
+            case .unreachable: return (.red, "Unreachable")
+            case .notConfigured: return (.gray, "Not Set Up")
+            }
+        }()
+
+        return HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 5, height: 5)
+            Text("OpenClaw")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color(.label))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .glassEffect(in: .capsule)
+        .accessibilityLabel("OpenClaw: \(label)")
     }
 
     // MARK: - Active Mode Badge
@@ -261,90 +331,3 @@ struct StatusIndicator: View {
 
 }
 
-// MARK: - Quick Actions Grid (standalone)
-
-/// Horizontal grid of quick action buttons, shown above the hero capsule.
-struct QuickActionsGrid: View {
-    @EnvironmentObject var appState: AppState
-    @State private var executingActionId: String?
-
-    private var allActions: [QuickAction] { Config.quickActions }
-
-    /// Show top 4 or all, based on user preference.
-    private var actions: [QuickAction] {
-        let all = allActions
-        if Config.showAllQuickActions {
-            return all
-        }
-        return Array(all.prefix(4))
-    }
-
-    private var isExecutingAction: Bool { executingActionId != nil }
-
-    private var visible: Bool {
-        guard appState.isConnected && appState.currentMode == .direct && !actions.isEmpty else { return false }
-        // Stay visible while an action is executing (shows spinner)
-        if isExecutingAction { return true }
-        // Otherwise hide when busy
-        return !appState.isProcessing
-            && !appState.isListening
-            && !appState.speechService.isSpeaking
-            && !appState.cameraService.isCaptureInProgress
-    }
-
-    var body: some View {
-        if appState.isConnected && appState.currentMode == .direct && !allActions.isEmpty {
-            let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
-
-            LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(actions) { action in
-                    quickActionButton(action)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 8)
-            .opacity(visible ? 1 : 0)
-            .allowsHitTesting(visible)
-            .animation(.easeInOut(duration: 0.2), value: visible)
-        }
-    }
-
-    private func quickActionButton(_ action: QuickAction) -> some View {
-        let isExecuting = executingActionId == action.id
-
-        return Button {
-            guard !isExecuting else { return }
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            executingActionId = action.id
-            Task {
-                await appState.executeQuickAction(action)
-                executingActionId = nil
-            }
-        } label: {
-            VStack(spacing: 5) {
-                ZStack {
-                    if isExecuting {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                    } else {
-                        Image(systemName: action.icon)
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(Color(.label))
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 42)
-                .glassEffect(in: .rect(cornerRadius: 12))
-
-                Text(action.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(isExecuting)
-        .accessibilityLabel(action.label)
-        .accessibilityHint(isExecuting ? "Running" : "Double-tap to execute")
-    }
-}
