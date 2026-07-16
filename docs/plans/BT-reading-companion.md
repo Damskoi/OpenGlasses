@@ -1,7 +1,8 @@
 # Plan BT — Reading Companion
 
-**Status: 🚧 P1 + P2 shipped (2026-07-16) — session core, live mode and Q&A wiring, headless
-throughout; device smoke owed. P3 planned.** A continuous *reading session* vertical: the glasses
+**Status: 🚧 P1 + P2 + P2.1 review remediation shipped (2026-07-16) — session core, live mode
+and Q&A wiring, headless throughout; device smoke owed. P3 planned; P4 (reference copy
+alignment) planned.** A continuous *reading session* vertical: the glasses
 read along with a physical book or e-reader, answer questions grounded in **what the
 reader has actually seen**, and turn each session into retention artifacts (recap, study
 deck) and reading stats. Every primitive already exists in this codebase — OCR (Plan A),
@@ -164,9 +165,52 @@ A multi-angle adversarial review of P1+P2 confirmed ten findings; all fixed in o
 - Kindle/e-reader specifics: screen glare/contrast OCR tuning — device-gated accuracy
   pass (the detector/OCR thresholds are Config-tunable so the pass is data-only).
 
+## P4 / PR4 — Reference copy alignment (planned, 2026-07-16)
+
+The user can supply their own copy of the book (PDF/EPUB, imported through the Plan O
+`DocumentStore` path — no second import pipeline) and the companion aligns each camera
+capture to its position in that canonical text. This vertical is appearing elsewhere with
+exactly this shape, and it earns its place on three merits:
+
+- **It attacks THE named risk from the cheap side.** *Locating* a noisy capture in the
+  canonical text needs only a few distinctive word sequences to survive the OCR;
+  *grounding* on that capture needs the whole page to survive. Once located, the corpus
+  entry is upgraded to the clean file text — bad OCR stops poisoning Q&A, recaps and
+  decks, and only has to be good enough to say where the reader is.
+- **True position.** `pageIndex` is capture order — a proxy invented because the camera
+  can't know the printed page. Alignment gives real pages/chapters, "you're 34% through",
+  and a sharper "where was I".
+- **Passive detection gets margin.** The explicit-capture escape hatch becomes much less
+  likely to be needed when a half-readable capture still matches.
+
+**Spoiler safety stays structural — the load-bearing rule:** the camera remains the *sole
+authority on the reading frontier*. The file never expands what the model may see; it only
+substitutes cleaner text for pages the camera already proved were read. The context builder
+clips file text at the furthest camera-matched position. No match → the raw capture stays,
+exactly as today.
+
+Shape (house style):
+- `BookAlignment` (pure): normalized OCR text + chunked canonical text → best-match
+  position with a confidence score. Shingle/n-gram overlap, deterministic, no LLM, no
+  clock; fixture-tested headless (clean page, noisy page, ambiguous page, no-match).
+- `ReadingSessionStore` gains an optional per-book reference (document id + per-page
+  alignment: matched range, confidence); captures keep their raw OCR so alignment is
+  re-runnable and reversible.
+- `ReadingContextBuilder` prefers aligned canonical text over raw OCR per page, hard-clipped
+  at the frontier; `ReadingRecapBuilder`/stats surface true position when a reference exists.
+- Edge (thin): "attach a copy" flow reusing the existing document import UI.
+
+Boundaries: upload-only (the user's own copy), processed on-device, **never fetch book text
+from the web**; fully optional — no file means today's behavior unchanged; rendering or
+reading the book *from the file* stays out of scope (below). Sequencing: planned now,
+urgency decided by the P3 device pass — if raw OCR proves fine, P4 is a position/progress
+feature; if it's as noisy as feared, P4 is the rescue and jumps the queue.
+
 ## Explicitly out of scope
-- EPUB/book-file import — this is camera-grounded reading, not an e-reader.
+- Reading the book *from a file* — no e-reader surface. A user-supplied copy is a P4
+  alignment reference for camera-grounded reading, never a display or TTS source.
 - Full-book knowledge (summaries of unread chapters, reviews) — violates the spoiler rule.
+  P4 does not soften this: file text past the camera frontier never enters context.
 - Text-to-speech of the page (Plan A's reading tool already does read-aloud on demand).
 
 ## Risks / escape hatches
