@@ -17,6 +17,7 @@ enum SiriContentType: String, Codable, CaseIterable {
     case teleprompterScript = "teleprompter_script"
     case playbook
     case studyDeck = "study_deck"
+    case readingSession = "reading_session"
     case conversation
     case fieldSession = "field_session"
 
@@ -28,6 +29,7 @@ enum SiriContentType: String, Codable, CaseIterable {
         case .teleprompterScript: return "Teleprompter Scripts"
         case .playbook: return "Playbooks"
         case .studyDeck: return "Study Decks"
+        case .readingSession: return "Reading Sessions"
         case .conversation: return "Conversations"
         case .fieldSession: return "Field Sessions"
         }

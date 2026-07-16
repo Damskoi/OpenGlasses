@@ -99,9 +99,12 @@ final class StudyService: ObservableObject {
 
     // MARK: - Generation
 
-    func makeDeck(fromText text: String, source: String?) async throws -> StudyDeck {
+    /// `systemPrompt` overrides the default generation instructions — the reading companion (Plan
+    /// BT) passes one that scopes the model to the session's pages, since a model that recognises
+    /// the book will otherwise happily quiz the reader on chapters they haven't reached.
+    func makeDeck(fromText text: String, source: String?, systemPrompt: String? = nil) async throws -> StudyDeck {
         guard let generate else { throw StudyServiceError.notConfigured }
-        guard let json = await generate(StudyContentBuilder.systemPrompt(),
+        guard let json = await generate(systemPrompt ?? StudyContentBuilder.systemPrompt(),
                                         StudyContentBuilder.userText(forContent: text),
                                         StudyContentBuilder.jsonSchema()) else {
             throw StudyServiceError.generationFailed

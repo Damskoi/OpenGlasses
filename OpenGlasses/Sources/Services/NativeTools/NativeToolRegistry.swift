@@ -225,6 +225,9 @@ final class NativeToolRegistry {
             // Study Mode — flashcards + quizzes over the same documents (via StudyService.shared).
             register(StudyTool())
         }
+        // Reading companion — session lifecycle only; the book Q&A rides the context block
+        // ReadingCompanionService injects into the prompt (Plan BT).
+        register(ReadingSessionTool())
 
         // LiveTranslationTool is registered separately after the service is created
 

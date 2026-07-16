@@ -994,6 +994,10 @@ class AppState: ObservableObject, AppStateProtocol {
         // camera enables the hands-free scan → OCR source.
         StudyService.shared.configure(llm: llmService, documentStore: documentStore, tts: speechService, camera: cameraService)
 
+        // Reading companion (Plan BT) — camera frames for page turns, Study Mode for the
+        // end-of-session deck, TTS for the recap.
+        ReadingCompanionService.shared.configure(camera: cameraService, study: StudyService.shared)
+
         // Skill Self-Evolution (Plan AW) — give the loop its LLM analyzer. The capture hook
         // (NativeToolRouter) feeds tool-error samples; this completes the loop so proposals reach the
         // review inbox. Agent-Mode-gated throughout; inert until the user turns Agent Mode on.
@@ -2237,6 +2241,9 @@ class AppState: ObservableObject, AppStateProtocol {
         LiveCoachService.shared.presence = presenceMonitor
         proactiveAlerts.presence = presenceMonitor
         AssistiveModeService.shared.presence = presenceMonitor
+        // Reading is the same shape as captions, not a tick loop: a reader is motionless and silent
+        // (so, `.idle`) but very much engaged, and it checks the same `.away`-only gate internally.
+        ReadingCompanionService.shared.presence = presenceMonitor
 
         // Continuous ambient captions can't take a tick multiplier (Plan W v2): a user reading them
         // silently is still engaged, so suspend ONLY when fully away (disconnected/backgrounded) and

@@ -143,6 +143,29 @@ enum SiriContentAdapters {
         }
     }
 
+    /// One record per sitting, so "the Hobbit I read on Tuesday" is findable (Plan BT). The text is
+    /// the reader's own captured pages — their book, their camera — which is why this is default-on
+    /// where conversations and field sessions aren't. Sessions with no readable pages are skipped:
+    /// a Spotlight hit with nothing behind it is worse than no hit.
+    static func readingSessions(_ sessions: [ReadingSession]) -> [IndexableRecord] {
+        sessions.compactMap { session in
+            let text = session.pages
+                .sorted { $0.pageIndex < $1.pageIndex }
+                .map { ReadingText.normalized($0.text) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            guard !text.isEmpty else { return nil }
+            return IndexableRecord(
+                contentType: .readingSession,
+                itemId: session.id,
+                title: "\(session.bookTitle) — \(session.pages.count) page\(session.pages.count == 1 ? "" : "s")",
+                text: text,
+                keywords: ["reading", "book", session.bookTitle],
+                date: session.startedAt
+            )
+        }
+    }
+
     /// Titles-only by construction — the input type has no message bodies.
     static func conversations(_ threads: [ConversationSummaryInput]) -> [IndexableRecord] {
         threads.map { thread in
