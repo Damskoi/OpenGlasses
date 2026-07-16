@@ -2352,6 +2352,42 @@ struct Config {
         UserDefaults.standard.set(value, forKey: "frameDedupHeartbeatSeconds")
     }
 
+    // MARK: - Reading Companion detector tuning (Plan BT P3)
+    //
+    // Config-backed so the P3 device pass (curved paperbacks, e-reader glare) is data-only —
+    // retune without a build. Code-only knobs, same posture as frameDedup* above.
+
+    /// dHash Hamming distance (of 64) at/below which the page detector treats two frames as the
+    /// same view. Deliberately tighter than frameDedup's default: a book on a table is static.
+    static var readingHammingThreshold: Int {
+        let v = UserDefaults.standard.object(forKey: "readingHammingThreshold") as? Int
+        return v ?? 3
+    }
+
+    static func setReadingHammingThreshold(_ value: Int) {
+        UserDefaults.standard.set(value, forKey: "readingHammingThreshold")
+    }
+
+    /// Seconds a page candidate must hold still before it's settled and sent to OCR.
+    static var readingStabilityWindowSeconds: TimeInterval {
+        let v = UserDefaults.standard.object(forKey: "readingStabilityWindowSeconds") as? Double
+        return v ?? 1.0
+    }
+
+    static func setReadingStabilityWindowSeconds(_ value: TimeInterval) {
+        UserDefaults.standard.set(value, forKey: "readingStabilityWindowSeconds")
+    }
+
+    /// Floor on the gap between two evaluated reading frames — the battery lever.
+    static var readingMinimumFrameInterval: TimeInterval {
+        let v = UserDefaults.standard.object(forKey: "readingMinimumFrameInterval") as? Double
+        return v ?? 0.5
+    }
+
+    static func setReadingMinimumFrameInterval(_ value: TimeInterval) {
+        UserDefaults.standard.set(value, forKey: "readingMinimumFrameInterval")
+    }
+
     // MARK: - Visual State Memory (Plan AV)
 
     /// When `true`, the live agent keeps a short rolling memory of distinct scenes

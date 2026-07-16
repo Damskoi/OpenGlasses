@@ -18,6 +18,10 @@ final class ReadingSessionStore: ObservableObject {
     /// Newest-first, matching the house convention for list-backing stores.
     @Published private(set) var sessions: [ReadingSession] = []
 
+    /// Reference copies by bookID (P4) — pointers into `DocumentStore`, own file so the P1
+    /// sessions schema is untouched and old data decodes unchanged.
+    @Published private(set) var references: [String: BookReference] = [:]
+
     private let directory: URL
     private let fileManager: FileManager
     private let duplicateHashDistance: Int
@@ -56,6 +60,78 @@ final class ReadingSessionStore: ObservableObject {
     }
 
     private var sessionsURL: URL { directory.appendingPathComponent("sessions.json") }
+    private var referencesURL: URL { directory.appendingPathComponent("references.json") }
+
+    // MARK: - Reference copies (P4)
+
+    func reference(forBook bookID: String) -> BookReference? { references[bookID] }
+
+    func attachReference(_ reference: BookReference) {
+        references[reference.bookID] = reference
+        persistReferences()
+    }
+
+    func detachReference(forBook bookID: String) {
+        references.removeValue(forKey: bookID)
+        persistReferences()
+    }
+
+    /// The reading frontier in reference words — the furthest position the camera has proven the
+    /// reader reached. Canonical text past this never enters any prompt.
+    func alignedFrontier(forBook bookID: String) -> Int? {
+        sessions.filter { $0.bookID == bookID }
+            .flatMap(\.pages)
+            .compactMap { $0.alignedRange?.upperBound }
+            .max()
+    }
+
+    /// Record the reader's "I've read up to here": everything before the current camera-proven
+    /// frontier counts as read (chapters read before the app, offline stretches between sittings).
+    /// Clamped to the frontier by construction — an assertion can never reach past what the
+    /// camera has witnessed. Returns the recorded position, or `nil` when there's no reference
+    /// or no aligned capture yet to anchor "here".
+    @discardableResult
+    func assertCaughtUp(forBook bookID: String) -> Int? {
+        guard var reference = references[bookID],
+              let frontier = alignedFrontier(forBook: bookID), frontier > 0 else { return nil }
+        reference.assertedReadUpTo = max(reference.assertedReadUpTo ?? 0, frontier)
+        references[bookID] = reference
+        persistReferences()
+        return reference.assertedReadUpTo
+    }
+
+    /// The largest stretch behind the frontier that is neither camera-witnessed nor asserted —
+    /// chapters read away from the app, or genuinely skipped. `nil` when there's no meaningful
+    /// hole. This is what lets the assistant *ask* instead of wrongly answering "that hasn't
+    /// come up yet" about a chapter the reader finished on the couch.
+    func unconfirmedGap(forBook bookID: String, minimumWords: Int = 1500) -> Range<Int>? {
+        guard let reference = references[bookID],
+              alignedFrontier(forBook: bookID) != nil else { return nil }
+        let asserted = reference.assertedReadUpTo ?? 0
+        let captured = sessions.filter { $0.bookID == bookID }
+            .flatMap(\.pages)
+            .compactMap(\.alignedRange)
+            .sorted { $0.lowerBound < $1.lowerBound }
+
+        var largest: Range<Int>?
+        var covered = asserted
+        for range in captured {
+            if range.lowerBound > covered {
+                let hole = covered..<range.lowerBound
+                if hole.count >= minimumWords, hole.count > (largest?.count ?? 0) { largest = hole }
+            }
+            covered = max(covered, range.upperBound)
+        }
+        return largest
+    }
+
+    /// How far through the reference copy the reader is (0…1), derived from stored alignments —
+    /// no book text needed, so "where was I?" can say it offline.
+    func progress(forBook bookID: String) -> Double? {
+        guard let reference = references[bookID], reference.wordCount > 0,
+              let frontier = alignedFrontier(forBook: bookID) else { return nil }
+        return min(1, Double(frontier) / Double(reference.wordCount))
+    }
 
     // MARK: - Sessions
 
@@ -100,7 +176,8 @@ final class ReadingSessionStore: ObservableObject {
     /// count: after `deleteSession` removes a non-terminal session, count would collide with the
     /// surviving higher indices and the context block would carry two pages with the same number.
     @discardableResult
-    func appendPage(text: String, dHash: UInt64, at date: Date = Date(), to sessionID: String) -> PageCapture? {
+    func appendPage(text: String, dHash: UInt64, at date: Date = Date(), to sessionID: String,
+                    alignment: BookAlignmentIndex.Match? = nil) -> PageCapture? {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return nil }
         let bookID = sessions[idx].bookID
         // Unsorted on purpose — this path needs only a max and membership, and it runs per capture.
@@ -111,7 +188,10 @@ final class ReadingSessionStore: ObservableObject {
         }
 
         let nextIndex = (priorPages.map(\.pageIndex).max() ?? -1) + 1
-        let capture = PageCapture(pageIndex: nextIndex, text: text, capturedAt: date, dHash: dHash)
+        let capture = PageCapture(pageIndex: nextIndex, text: text, capturedAt: date, dHash: dHash,
+                                  alignedStart: alignment?.wordRange.lowerBound,
+                                  alignedWordCount: alignment.map(\.wordRange.count),
+                                  alignedConfidence: alignment?.confidence)
         sessions[idx].pages.append(capture)
         scheduleCheckpoint()
         return capture
@@ -191,12 +271,35 @@ final class ReadingSessionStore: ObservableObject {
     var checkpointInterval: TimeInterval = 60
     private var checkpointTask: Task<Void, Never>?
 
+    /// Separate suppression flag for the references file (same invariant as `saveBlocked`).
+    private var referencesSaveBlocked = false
+
     private func load() {
         switch JSONStore.loadArray(ReadingSession.self, at: sessionsURL, name: "reading_sessions") {
         case .loaded(let s), .recovered(let s, _): sessions = s
         case .corrupt: sessions = []          // original preserved in StoreRecovery
         case .unreadable: saveBlocked = true
         case .absent: break
+        }
+        switch JSONStore.loadDictionary(BookReference.self, at: referencesURL, name: "reading_references") {
+        case .loaded(let r), .recovered(let r, _): references = r
+        case .corrupt: references = [:]
+        case .unreadable: referencesSaveBlocked = true
+        case .absent: break
+        }
+    }
+
+    private func persistReferences() {
+        guard !referencesSaveBlocked else {
+            NSLog("[ReadingSessionStore] Reference save skipped — last load failed to read the existing file")
+            return
+        }
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONEncoder().encode(references).write(to: referencesURL, options: .atomic)
+            protectIfNeeded(referencesURL)
+        } catch {
+            NSLog("[ReadingSessionStore] reference persist failed: %@", error.localizedDescription)
         }
     }
 

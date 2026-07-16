@@ -381,8 +381,9 @@ class LLMService: ObservableObject {
         // classifier on purpose: mid-book questions ("who is she?") match no keyword list, so the
         // live session is the signal — same call the playbook context makes. Here rather than as a
         // threaded parameter because this function is on every path (the lean on-device prompt
-        // included), so local, cloud and cloud-agent all get it from this one line.
-        if let readingContext = ReadingCompanionService.shared.promptContext() {
+        // included), so local, cloud and cloud-agent all get it from this one line. The turn lets
+        // the P4 catch-up retrieval pick which confirmed-read earlier passages ride along.
+        if let readingContext = ReadingCompanionService.shared.promptContext(turn: turn) {
             prompt += "\n\n\(readingContext)"
         }
         // Inject project-scoped notes for the active job (what the user is mid-way through).

@@ -18,7 +18,8 @@ enum ReadingRecapBuilder {
 
     /// Spoken when a session starts on a book with prior pages — "where was I?".
     /// `nil` when there's nothing read yet, so the caller can say its own first-session line.
-    static func resumeRecap(stats: ReadingStats, lastPageText: String?) -> String? {
+    /// `progress` (0…1) is true position from a P4 reference copy, when one is attached.
+    static func resumeRecap(stats: ReadingStats, lastPageText: String?, progress: Double? = nil) -> String? {
         guard stats.pageCount > 0 else { return nil }
 
         var out = "You're \(stats.pageCount) page\(plural(stats.pageCount)) into \(stats.bookTitle)"
@@ -26,9 +27,20 @@ enum ReadingRecapBuilder {
             out += ", across \(stats.sessionCount) sittings"
         }
         out += "."
+        if let sentence = progressSentence(progress) { out += " \(sentence)" }
         if let pace = paceSentence(stats) { out += " \(pace)" }
         if let tail = excerptSentence(lastPageText, lead: "Last thing you read:") { out += " \(tail)" }
         return out
+    }
+
+    /// "About NN% of the way through." Only with a real signal: below 1% the honest answer is
+    /// that they've just started, and rounding to "0%" would tell a reader who did read that
+    /// they've read nothing.
+    static func progressSentence(_ progress: Double?) -> String? {
+        guard let progress, progress > 0 else { return nil }
+        let percent = Int((progress * 100).rounded())
+        guard percent >= 1 else { return "You've just started the book." }
+        return "That's about \(min(percent, 100))% of the way through."
     }
 
     /// Spoken and saved as a note when a session ends. `overview` is the deck summary when the LLM
@@ -59,11 +71,16 @@ enum ReadingRecapBuilder {
     /// The text handed to deck generation. Only this session's pages — a deck over the whole book
     /// would quiz the reader on chapters they haven't reached, which is the spoiler rule in a
     /// different coat. `nil` when the session has no readable text.
-    static func deckSource(session: ReadingSession) -> String? {
+    static func deckSource(session: ReadingSession, reference: BookAlignmentIndex? = nil) -> String? {
         let pages = session.pages
             .sorted { $0.pageIndex < $1.pageIndex }
             .compactMap { page -> String? in
-                let text = ReadingText.normalized(page.text)
+                // Aligned pages feed the deck their clean canonical slice (P4) — flashcards built
+                // from garbled OCR quiz the reader on the garbling. Same frontier property as the
+                // context builder: slices exist only for camera-captured pages.
+                let text = reference.flatMap { ref in
+                    page.alignedRange.map { ref.slice(wordRange: $0) }
+                }.flatMap { $0.isEmpty ? nil : $0 } ?? ReadingText.normalized(page.text)
                 return text.isEmpty ? nil : "[p\(page.pageIndex + 1)] \(text)"
             }
         return pages.isEmpty ? nil : pages.joined(separator: "\n\n")

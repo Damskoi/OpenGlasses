@@ -44,33 +44,95 @@ enum ReadingContextBuilder {
     ///   - budgetCharacters: hard ceiling on the returned block, roughly 4 characters per token to
     ///     match the estimator in `HistoryHygiene` (default 6000 ≈ 1.5k tokens).
     ///   - excerptCharacters: per-page ceiling in the condensed section (default 160).
+    ///   - reference: the book's canonical copy when one is attached (P4). Aligned pages then
+    ///     ground on the clean canonical slice instead of their raw OCR. Spoiler safety is
+    ///     unchanged by construction: slices exist only for camera-captured pages, so canonical
+    ///     text past the reading frontier has no path in.
+    ///   - assertedReadUpTo: the reader's "I've read up to here" mark (already clamped to the
+    ///     camera frontier by the store). With a `turn`, the most relevant passages from that
+    ///     confirmed-read region are retrieved as grounding for questions about chapters read
+    ///     away from the app.
+    ///   - unconfirmedGap: a stretch behind the frontier that is neither captured nor asserted —
+    ///     surfaced to the model so it *asks* ("did you read that part away from the glasses?")
+    ///     instead of wrongly answering "that hasn't come up yet".
+    ///   - turn: the user's current utterance, when the caller has it (Direct mode does; a Live
+    ///     session's instruction is built per-connect and passes nil).
     static func block(bookTitle: String,
                       pages: [PageCapture],
                       recentPages: Int = 3,
                       budgetCharacters: Int = 6000,
-                      excerptCharacters: Int = 160) -> String? {
+                      excerptCharacters: Int = 160,
+                      reference: BookAlignmentIndex? = nil,
+                      assertedReadUpTo: Int? = nil,
+                      unconfirmedGap: Range<Int>? = nil,
+                      turn: String? = nil) -> String? {
 
-        // Pages whose OCR yielded nothing can't ground an answer. They stay in the store (a page
-        // was turned — that's real, and the stats want it) but contribute nothing here.
+        // A page grounds on its canonical slice when aligned, its raw OCR otherwise. Either way,
+        // pages with nothing readable can't ground an answer — they stay in the store (a page was
+        // turned; the stats want it) but contribute nothing here.
+        func groundedText(_ page: PageCapture) -> String {
+            if let reference, let range = page.alignedRange {
+                let slice = reference.slice(wordRange: range)
+                if !slice.isEmpty { return slice }
+            }
+            return ReadingText.normalized(page.text)
+        }
         let ordered = pages
             .sorted { $0.pageIndex < $1.pageIndex }
-            .filter { !ReadingText.normalized($0.text).isEmpty }
+            .map { (page: $0, text: groundedText($0)) }
+            .filter { !$0.text.isEmpty }
         guard let newest = ordered.last else { return nil }
 
-        let header = "READING — \"\(bookTitle)\": \(ordered.count) page(s) seen so far, numbered in "
-            + "the order the reader saw them (p\(newest.pageIndex + 1) is where they are now)."
+        var header = "READING — \"\(bookTitle)\": \(ordered.count) page(s) seen so far, numbered in "
+            + "the order the reader saw them (p\(newest.page.pageIndex + 1) is where they are now)."
+        if let reference, reference.wordCount > 0,
+           let frontier = pages.compactMap({ $0.alignedRange?.upperBound }).max() {
+            let percent = Int((Double(frontier) / Double(reference.wordCount) * 100).rounded())
+            header += " The reader is about \(percent)% of the way through the book."
+        }
+        if assertedReadUpTo ?? 0 > 0 {
+            header += " The reader has confirmed they also read the earlier part of the book "
+                + "(away from the glasses); passages from it may appear below as \"earlier in the book\"."
+        }
+        if unconfirmedGap != nil {
+            header += " NOTE: part of the book before the reader's current position was neither "
+                + "captured nor confirmed — they may have read it away from the glasses, or skipped "
+                + "it. If they ask about that part, do not reveal its content; ask whether they've "
+                + "read it, and if yes tell them to say \"I've read up to here\" so it counts."
+        }
         let fixed = header + "\n" + spoilerRule
         let overhead = fixed.count + condensedHeading.count + verbatimHeading.count + omissionNoteReserve
         let remaining = budgetCharacters - overhead
         guard remaining >= minimumPageCharacters else { return nil }
 
+        // Grounding for the confirmed-read region (P4 catch-up): the current question selects
+        // which earlier passages ride along. Capped at a quarter of the budget — the recent
+        // captured pages stay the primary grounding.
+        var retrieved: [String] = []
+        if let reference, let asserted = assertedReadUpTo, asserted > 0,
+           let turn, !turn.isEmpty {
+            var retrievalBudget = budgetCharacters / 4
+            for passage in reference.retrieve(query: turn, upTo: asserted) {
+                let line = "- …\(truncate(passage, to: min(retrievalBudget, 600)))"
+                guard line.count + 1 <= retrievalBudget else { break }
+                retrieved.append(line)
+                retrievalBudget -= line.count + 1
+            }
+        }
+        let retrievedHeading = "\n\nEarlier in the book (confirmed read, most relevant to the question):"
+        let retrievedUsed = retrieved.isEmpty
+            ? 0
+            : retrievedHeading.count + retrieved.reduce(0) { $0 + $1.count + 1 }
+
         // Verbatim pages get first call on the budget but are capped at two-thirds of it, so a
         // long current page can't starve the condensed history that long-range questions need.
-        let verbatimCap = min(remaining, max(minimumPageCharacters, budgetCharacters * 2 / 3))
+        let remainingAfterRetrieval = remaining - retrievedUsed
+        guard remainingAfterRetrieval >= minimumPageCharacters else { return nil }
+        let verbatimCap = min(remainingAfterRetrieval, max(minimumPageCharacters, budgetCharacters * 2 / 3))
         var verbatim: [String] = []
         var verbatimUsed = 0
-        for page in ordered.suffix(max(1, recentPages)).reversed() {
-            let line = "[p\(page.pageIndex + 1)] \(ReadingText.normalized(page.text))"
+        for entry in ordered.suffix(max(1, recentPages)).reversed() {
+            let line = "[p\(entry.page.pageIndex + 1)] \(entry.text)"
             if verbatimUsed + line.count + 1 <= verbatimCap {
                 verbatim.insert(line, at: 0)
                 verbatimUsed += line.count + 1
@@ -88,15 +150,18 @@ enum ReadingContextBuilder {
         let older = ordered.dropLast(verbatim.count)
         var condensed: [String] = []
         var condensedUsed = 0
-        let condensedCap = remaining - verbatimUsed
-        for page in older.reversed() {
-            let line = "- p\(page.pageIndex + 1): \(truncate(ReadingText.normalized(page.text), to: excerptCharacters))"
+        let condensedCap = remainingAfterRetrieval - verbatimUsed
+        for entry in older.reversed() {
+            let line = "- p\(entry.page.pageIndex + 1): \(truncate(entry.text, to: excerptCharacters))"
             guard condensedUsed + line.count + 1 <= condensedCap else { break }
             condensed.insert(line, at: 0)
             condensedUsed += line.count + 1
         }
 
         var out = fixed
+        if !retrieved.isEmpty {
+            out += retrievedHeading + "\n" + retrieved.joined(separator: "\n")
+        }
         let omitted = older.count - condensed.count
         if !condensed.isEmpty {
             out += condensedHeading
