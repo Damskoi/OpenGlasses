@@ -69,7 +69,10 @@ final class MedicalComplianceTests: XCTestCase {
     }
 
     func testHipaaDisabledToolsContainsExpectedTools() {
-        let expected: Set<String> = ["web_search", "send_message", "send_via", "openclaw_skills"]
+        // reading_session: passive camera OCR of whatever is in front of the wearer — a "book"
+        // can be a patient chart (Plan BT review remediation).
+        let expected: Set<String> = ["web_search", "send_message", "send_via", "openclaw_skills",
+                                     "reading_session"]
         XCTAssertEqual(Config.hipaaDisabledTools, expected)
     }
 

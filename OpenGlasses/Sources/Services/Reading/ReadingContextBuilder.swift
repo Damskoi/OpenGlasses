@@ -111,10 +111,17 @@ enum ReadingContextBuilder {
 
     /// Cut to `limit` characters at a word boundary where there is one, marking the cut so neither
     /// the model nor the reader mistakes a truncated page for a short one.
+    ///
+    /// The boundary cut is only taken when it keeps at least half the budget: on one giant
+    /// unbroken token the only space in range is the one inside the "[pN] " label, and honoring
+    /// it would ship a bare page number with zero content — a mid-word cut is the lesser evil.
     private static func truncate(_ text: String, to limit: Int) -> String {
         guard limit > 1, text.count > limit else { return text }
         let cut = String(text.prefix(limit - 1))
-        let atBoundary = cut.lastIndex(of: " ").map { String(cut[cut.startIndex..<$0]) } ?? cut
-        return (atBoundary.isEmpty ? cut : atBoundary) + "…"
+        if let space = cut.lastIndex(of: " ") {
+            let atBoundary = String(cut[cut.startIndex..<space])
+            if atBoundary.count >= limit / 2 { return atBoundary + "…" }
+        }
+        return cut + "…"
     }
 }

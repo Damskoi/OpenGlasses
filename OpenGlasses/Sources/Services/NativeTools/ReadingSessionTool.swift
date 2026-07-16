@@ -56,7 +56,9 @@ struct ReadingSessionTool: NativeTool {
             guard let book, !book.isEmpty else {
                 return "Which book? Say \"start reading\" with the title."
             }
-            return await service.start(bookID: ReadingBookID.make(from: book), bookTitle: book)
+            // Resolve against the shelf so "Hobbit" continues "The Hobbit" rather than forking
+            // a second corpus under a new slug.
+            return await service.start(bookID: service.resolveBookID(forSpokenTitle: book), bookTitle: book)
 
         case "pause":
             guard service.isActive else { return "No reading session is running." }
@@ -72,17 +74,25 @@ struct ReadingSessionTool: NativeTool {
             return await service.end()
 
         case "where_was_i":
-            let bookID = book.map { ReadingBookID.make(from: $0) }
+            let bookID = book.map { service.resolveBookID(forSpokenTitle: $0) }
             return service.whereWasI(bookID: bookID)
                 ?? "I haven't read anything with you yet."
 
+        // "status" is also the graceful floor for any action string the model invents — never
+        // error a voice turn over an enum mismatch.
+        case "status":
+            fallthrough
         default:
             guard let session = service.activeSession else {
                 return "No reading session is running."
             }
             let pages = service.pagesThisSession
             let state = service.isPaused ? "Paused" : "Reading"
-            return "\(state) \(session.bookTitle) — \(pages) page\(pages == 1 ? "" : "s") this sitting."
+            var line = "\(state) \(session.bookTitle) — \(pages) page\(pages == 1 ? "" : "s") this sitting."
+            if service.streamInterrupted {
+                line += " The camera has dropped out, so I'm not seeing pages right now — say \"resume reading\" once the glasses reconnect."
+            }
+            return line
         }
     }
 }

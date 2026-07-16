@@ -565,6 +565,16 @@ class GeminiLiveSessionManager: ObservableObject {
             prompt += "\n\n\(projectContext)"
         }
 
+        // Inject the pages read so far when a reading session is live (Plan BT). Without this,
+        // Live mode had the reading_session tool but no corpus or spoiler rule — book questions
+        // were answered from the model's world knowledge, the exact spoiler the feature exists to
+        // prevent. The instruction is rebuilt on connect/reconnect (not per turn), so pages
+        // captured mid-Live-session appear on the next reconnect; the spoiler rule itself is
+        // present from the start, and stale-but-spoiler-safe beats absent.
+        if let readingContext = ReadingCompanionService.shared.promptContext() {
+            prompt += "\n\n\(readingContext)"
+        }
+
         // Security baseline: untrusted-content / prompt-injection policy (mirrors Direct Mode).
         prompt += PromptInjectionPolicy.systemPromptPolicy
 

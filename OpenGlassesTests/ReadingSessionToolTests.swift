@@ -71,6 +71,25 @@ final class ReadingSessionToolTests: XCTestCase {
         XCTAssertTrue(unread.contains("haven't read anything"))
     }
 
+    /// Review finding: exact-slug identity forked books on spoken variants — "Hobbit" after
+    /// "The Hobbit" either denied the history or split the corpus across two IDs.
+    func testSpokenTitleVariantContinuesTheSameBook() async throws {
+        let (tool, _, store) = makeTool()
+        _ = try await tool.execute(args: ["action": "start", "book": "The Hobbit"])
+        _ = try await tool.execute(args: ["action": "end"])
+
+        _ = try await tool.execute(args: ["action": "start", "book": "Hobbit"])
+        XCTAssertEqual(Set(store.sessions.map(\.bookID)).count, 1,
+                       "one book on the shelf, however the reader says its name")
+
+        let s = store.sessions.first!
+        store.appendPage(text: "It was a hobbit-hole, and that means comfort — a long paragraph of it.",
+                         dHash: 0x1, at: Date(), to: s.id)
+        _ = try await tool.execute(args: ["action": "end"])
+        let recap = try await tool.execute(args: ["action": "where_was_i", "book": "Hobbit"])
+        XCTAssertTrue(recap.contains("into The Hobbit"), recap)
+    }
+
     /// The tool moves the session between states; the book's content is answered from the injected
     /// context block. Saying so in the description is what keeps the model from calling this to
     /// "look something up" mid-chapter.
@@ -115,6 +134,18 @@ final class ReadingSpotlightAdapterTests: XCTestCase {
     func testSessionsWithNothingReadableAreNotIndexed() {
         XCTAssertTrue(SiriContentAdapters.readingSessions([session(pages: [])]).isEmpty)
         XCTAssertTrue(SiriContentAdapters.readingSessions([session(pages: ["", "  "])]).isEmpty)
+    }
+
+    /// Review finding: donating the full corpus meant every foreground refresh re-joined and
+    /// SHA256-hashed a forever-growing body of prose — and put verbatim pages of whatever the
+    /// user reads into the system index. Bounded like the playbook adapter instead.
+    func testDonatedTextIsCappedToAnExcerpt() throws {
+        let longPages = (0..<40).map { i in "page \(i) " + String(repeating: "words ", count: 100) }
+        let records = SiriContentAdapters.readingSessions([session(pages: longPages)])
+        let record = try XCTUnwrap(records.first)
+        XCTAssertLessThanOrEqual(record.text.count, SiriContentAdapters.readingSessionExcerptLimit)
+        XCTAssertTrue(record.text.hasPrefix("page 0"), "the excerpt starts at the sitting's start")
+        XCTAssertTrue(record.title.contains("40 pages"), "the full page count still shows in the title")
     }
 
     /// The reader's own captured pages of their own book — no reason to make them opt in, unlike
