@@ -341,6 +341,7 @@ final class ReadingCompanionService: ObservableObject {
             budgetCharacters: contextBudgetCharacters,
             reference: alignmentIndex,
             assertedReadUpTo: store.reference(forBook: session.bookID)?.assertedReadUpTo,
+            retrievalRanges: store.coveredRanges(forBook: session.bookID),
             unconfirmedGap: store.unconfirmedGap(forBook: session.bookID),
             turn: turn)
     }

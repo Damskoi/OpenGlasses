@@ -130,19 +130,18 @@ struct BookAlignmentIndex {
                      progress: Double(end) / Double(max(1, wordCount)))
     }
 
-    /// Retrieve the passages most relevant to `query` from the read region `[0, upTo)` — the
-    /// grounding for stretches the reader *asserted* they read away from the app (P4 catch-up).
-    /// Eleven asserted chapters can't ride in the prompt verbatim; the current question selects
-    /// which earlier passages matter.
+    /// Retrieve the passages most relevant to `query` from the reader's covered region — asserted
+    /// stretches, captured pages, and interpolated small same-sitting holes (P4 catch-up). Whole
+    /// chapters can't ride in the prompt verbatim; the current question selects which earlier
+    /// passages matter.
     ///
     /// Deterministic keyword-window scoring, no embeddings, no LLM: fixed windows are scored by
     /// how many distinct content words of the query they contain; ties break toward later
-    /// positions (nearer the reader's frontier, likelier relevant). `upTo` is a hard clamp —
-    /// callers pass the asserted mark, itself clamped to the camera frontier, so retrieval can
-    /// never surface unread text.
-    func retrieve(query: String, upTo limit: Int, maxSlices: Int = 2, windowWords: Int = 120) -> [String] {
-        let bound = min(max(0, limit), wordCount)
-        guard bound > 0, maxSlices > 0 else { return [] }
+    /// positions (nearer the reader's frontier, likelier relevant). `ranges` is the hard clamp —
+    /// callers pass the store's covered ranges, every one of which is at or behind the camera
+    /// frontier by construction, so retrieval can never surface unread text.
+    func retrieve(query: String, within ranges: [Range<Int>], maxSlices: Int = 2, windowWords: Int = 120) -> [String] {
+        guard maxSlices > 0 else { return [] }
 
         // Content words: normalized, 3+ characters — drops "who", "is", "the"-grade noise
         // without needing a stopword list.
@@ -152,18 +151,23 @@ struct BookAlignmentIndex {
         guard !terms.isEmpty else { return [] }
 
         let step = max(1, windowWords / 2)
-        var scored: [(start: Int, score: Int)] = []
-        var windowStart = 0
-        while windowStart < bound {
-            let windowEnd = min(windowStart + windowWords, bound)
-            var found: Set<String> = []
-            for wordIndex in windowStart..<windowEnd {
-                let normalized = Self.normalizeWord(originalWords[wordIndex])
-                if terms.contains(normalized) { found.insert(normalized) }
+        var scored: [(start: Int, end: Int, score: Int)] = []
+        for range in ranges {
+            let lower = min(max(0, range.lowerBound), wordCount)
+            let upper = min(max(lower, range.upperBound), wordCount)
+            guard lower < upper else { continue }
+            var windowStart = lower
+            while windowStart < upper {
+                let windowEnd = min(windowStart + windowWords, upper)
+                var found: Set<String> = []
+                for wordIndex in windowStart..<windowEnd {
+                    let normalized = Self.normalizeWord(originalWords[wordIndex])
+                    if terms.contains(normalized) { found.insert(normalized) }
+                }
+                if !found.isEmpty { scored.append((windowStart, windowEnd, found.count)) }
+                if windowEnd == upper { break }
+                windowStart += step
             }
-            if !found.isEmpty { scored.append((windowStart, found.count)) }
-            if windowEnd == bound { break }
-            windowStart += step
         }
         guard !scored.isEmpty else { return [] }
 
@@ -172,13 +176,17 @@ struct BookAlignmentIndex {
         let ranked = scored.sorted { ($0.score, $0.start) > ($1.score, $1.start) }
         var picked: [(start: Int, end: Int)] = []
         for candidate in ranked where picked.count < maxSlices {
-            let end = min(candidate.start + windowWords, bound)
-            guard !picked.contains(where: { candidate.start < $0.end && end > $0.start }) else { continue }
-            picked.append((candidate.start, end))
+            guard !picked.contains(where: { candidate.start < $0.end && candidate.end > $0.start }) else { continue }
+            picked.append((candidate.start, candidate.end))
         }
         return picked
             .sorted { $0.start < $1.start }   // reading order in the prompt
             .map { slice(wordRange: $0.start..<$0.end) }
+    }
+
+    /// Convenience for a single contiguous region `[0, upTo)`.
+    func retrieve(query: String, upTo limit: Int, maxSlices: Int = 2, windowWords: Int = 120) -> [String] {
+        retrieve(query: query, within: [0..<max(0, limit)], maxSlices: maxSlices, windowWords: windowWords)
     }
 
     /// The reference's own text for a matched range — the clean grounding that replaces the

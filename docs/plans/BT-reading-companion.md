@@ -203,7 +203,15 @@ A multi-angle adversarial review of P1+P2 confirmed ten findings; all fixed in o
   real ZIP bytes built by a stored-entry writer, plus a Compression-framework deflate round-trip.
 - Spoiler safety verified structurally in tests: canonical text one word past the camera-proven
   frontier does not appear in the block.
-- **Catch-up ("I've read up to here"):** the corpus is *witnessed-or-asserted*, never inferred.
+- **Small-hole interpolation:** one bounded inference exists, added deliberately: a hole smaller
+  than ~800 words flanked by aligned captures from the *same sitting* counts as covered — the
+  camera witnessed the sitting's continuity and merely blinked on a page (blur, empty OCR, a
+  false dedup drop). Holes between sittings never interpolate, however small (no continuity
+  evidence across time — that's the assertion's job), and nothing can exceed the frontier since
+  both flanks are camera-proven. Covered regions (asserted + captured + interpolated,
+  `coveredRanges`) are what retrieval searches.
+- **Catch-up ("I've read up to here"):** beyond that one bounded case, the corpus is
+  *witnessed-or-asserted*, never inferred.
   A reader who starts the app mid-book (or reads offline between sittings — captures at chapters
   1–3, a gap at 4–9, captures at 10+) can assert the earlier stretch as read: `assertedReadUpTo`
   is a single monotonic high-water mark on `BookReference`, **clamped to the camera frontier** so

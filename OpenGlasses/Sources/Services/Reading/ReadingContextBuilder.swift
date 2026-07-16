@@ -49,9 +49,12 @@ enum ReadingContextBuilder {
     ///     unchanged by construction: slices exist only for camera-captured pages, so canonical
     ///     text past the reading frontier has no path in.
     ///   - assertedReadUpTo: the reader's "I've read up to here" mark (already clamped to the
-    ///     camera frontier by the store). With a `turn`, the most relevant passages from that
-    ///     confirmed-read region are retrieved as grounding for questions about chapters read
-    ///     away from the app.
+    ///     camera frontier by the store). Drives the header note about confirmed offline reading.
+    ///   - retrievalRanges: the reader's covered region (asserted + captured + interpolated
+    ///     small same-sitting holes, from `ReadingSessionStore.coveredRanges`). With a `turn`,
+    ///     the most relevant passages from it are retrieved as extra grounding — questions about
+    ///     offline-read chapters, a page the camera blinked on, or an old page whose condensed
+    ///     excerpt is too thin.
     ///   - unconfirmedGap: a stretch behind the frontier that is neither captured nor asserted —
     ///     surfaced to the model so it *asks* ("did you read that part away from the glasses?")
     ///     instead of wrongly answering "that hasn't come up yet".
@@ -64,6 +67,7 @@ enum ReadingContextBuilder {
                       excerptCharacters: Int = 160,
                       reference: BookAlignmentIndex? = nil,
                       assertedReadUpTo: Int? = nil,
+                      retrievalRanges: [Range<Int>] = [],
                       unconfirmedGap: Range<Int>? = nil,
                       turn: String? = nil) -> String? {
 
@@ -105,21 +109,20 @@ enum ReadingContextBuilder {
         let remaining = budgetCharacters - overhead
         guard remaining >= minimumPageCharacters else { return nil }
 
-        // Grounding for the confirmed-read region (P4 catch-up): the current question selects
-        // which earlier passages ride along. Capped at a quarter of the budget — the recent
-        // captured pages stay the primary grounding.
+        // Grounding from the covered region (P4): the current question selects which earlier
+        // passages ride along. Capped at a quarter of the budget — the recent captured pages
+        // stay the primary grounding.
         var retrieved: [String] = []
-        if let reference, let asserted = assertedReadUpTo, asserted > 0,
-           let turn, !turn.isEmpty {
+        if let reference, !retrievalRanges.isEmpty, let turn, !turn.isEmpty {
             var retrievalBudget = budgetCharacters / 4
-            for passage in reference.retrieve(query: turn, upTo: asserted) {
+            for passage in reference.retrieve(query: turn, within: retrievalRanges) {
                 let line = "- …\(truncate(passage, to: min(retrievalBudget, 600)))"
                 guard line.count + 1 <= retrievalBudget else { break }
                 retrieved.append(line)
                 retrievalBudget -= line.count + 1
             }
         }
-        let retrievedHeading = "\n\nEarlier in the book (confirmed read, most relevant to the question):"
+        let retrievedHeading = "\n\nEarlier in the book (from what the reader has read, most relevant to the question):"
         let retrievedUsed = retrieved.isEmpty
             ? 0
             : retrievedHeading.count + retrieved.reduce(0) { $0 + $1.count + 1 }

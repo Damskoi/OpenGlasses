@@ -237,25 +237,94 @@ final class ReadingP3P4Tests: XCTestCase {
         XCTAssertEqual(store.assertCaughtUp(forBook: "b"), 450, "assertions are cumulative, never lower")
     }
 
-    func testRetrievalSectionRequiresBothAssertionAndTurn() {
+    func testRetrievalSectionRequiresCoveredRangesAndTurn() {
         let (store, _, reference) = gapScenario()
         store.assertCaughtUp(forBook: "book")
         let pages = store.pages(forBook: "book")
+        let covered = store.coveredRanges(forBook: "book")
 
         let withTurn = ReadingContextBuilder.block(
             bookTitle: "Book", pages: pages, reference: reference,
-            assertedReadUpTo: 5000, turn: "remind me about w2500")
-        XCTAssertTrue(withTurn?.contains("Earlier in the book (confirmed read") == true)
+            assertedReadUpTo: 5000, retrievalRanges: covered, turn: "remind me about w2500")
+        XCTAssertTrue(withTurn?.contains("Earlier in the book") == true)
         XCTAssertTrue(withTurn?.contains("w2500") == true)
 
         let withoutTurn = ReadingContextBuilder.block(
-            bookTitle: "Book", pages: pages, reference: reference, assertedReadUpTo: 5000)
-        XCTAssertFalse(withoutTurn?.contains("Earlier in the book (confirmed read") == true)
+            bookTitle: "Book", pages: pages, reference: reference,
+            assertedReadUpTo: 5000, retrievalRanges: covered)
+        XCTAssertFalse(withoutTurn?.contains("Earlier in the book") == true)
+    }
 
-        let withoutAssertion = ReadingContextBuilder.block(
-            bookTitle: "Book", pages: pages, reference: reference, turn: "remind me about w2500")
-        XCTAssertFalse(withoutAssertion?.contains("w2500 ") == true,
-                       "no assertion → the offline-read middle stays out of the prompt")
+    /// Without the assertion, the big offline-read hole is NOT covered (4000 words is far past
+    /// the interpolation limit), so its content stays out of the prompt even for a matching
+    /// question — inference never fills large gaps.
+    func testLargeGapStaysUncoveredWithoutAssertion() {
+        let (store, _, reference) = gapScenario()
+        let covered = store.coveredRanges(forBook: "book")
+        XCTAssertEqual(covered, [0..<500, 4500..<5000], "the 4–9 stretch is not covered")
+
+        let block = ReadingContextBuilder.block(
+            bookTitle: "Book", pages: store.pages(forBook: "book"), reference: reference,
+            retrievalRanges: covered, turn: "remind me about w2500")
+        XCTAssertFalse(block?.contains("w2500 ") == true)
+    }
+
+    // MARK: - Small-hole interpolation (P4)
+
+    /// The camera blinked on a page mid-sitting (blur, empty OCR, a false dedup drop): a hole
+    /// smaller than the interpolation limit, flanked by captures from the SAME sitting, counts
+    /// as read — its content is retrievable without any assertion.
+    func testMissedPageWithinASittingIsInterpolated() {
+        let store = ReadingSessionStore(directory: tempDir())
+        let reference = BookAlignmentIndex(text: (0..<2000).map { "w\($0)" }.joined(separator: " "))
+        store.attachReference(BookReference(bookID: "book", documentId: "d", documentName: "b.epub",
+                                            wordCount: 2000, attachedAt: t0))
+        let s = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: "page before the missed one long enough for dedup", dHash: 0x1,
+                         at: t0, to: s.id,
+                         alignment: .init(wordRange: 0..<500, confidence: 0.9, progress: 0.25))
+        // …one page missed (hole 500..<700, 200 words)…
+        store.appendPage(text: "page after the missed one also long enough here", dHash: 0xFF00,
+                         at: t0.addingTimeInterval(120), to: s.id,
+                         alignment: .init(wordRange: 700..<1200, confidence: 0.9, progress: 0.6))
+
+        XCTAssertEqual(store.coveredRanges(forBook: "book"), [0..<1200],
+                       "the small same-sitting hole is interpolated into one covered range")
+        XCTAssertNil(store.unconfirmedGap(forBook: "book"), "a blink is not a gap to nag about")
+
+        // A question about the missed page's content retrieves its canonical text.
+        let block = ReadingContextBuilder.block(
+            bookTitle: "Book", pages: store.pages(forBook: "book"), reference: reference,
+            retrievalRanges: store.coveredRanges(forBook: "book"), turn: "what was w600 about")
+        XCTAssertTrue(block?.contains("w600 ") == true, "the blinked page grounds via interpolation")
+    }
+
+    /// The two boundaries interpolation must respect: size, and sitting.
+    func testInterpolationRespectsSizeAndSessionBoundaries() {
+        let store = ReadingSessionStore(directory: tempDir())
+        store.attachReference(BookReference(bookID: "book", documentId: "d", documentName: "b.pdf",
+                                            wordCount: 10_000, attachedAt: t0))
+
+        // Same sitting, hole of 900 words (> 800 limit): NOT interpolated.
+        let s1 = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: "first captured page long enough for the dedup floor", dHash: 0x1,
+                         at: t0, to: s1.id,
+                         alignment: .init(wordRange: 0..<300, confidence: 0.9, progress: 0.03))
+        store.appendPage(text: "second captured page long enough for the dedup floor", dHash: 0xFF00,
+                         at: t0.addingTimeInterval(60), to: s1.id,
+                         alignment: .init(wordRange: 1200..<1500, confidence: 0.9, progress: 0.15))
+        XCTAssertEqual(store.coveredRanges(forBook: "book"), [0..<300, 1200..<1500],
+                       "a hole past the size limit is never inferred read")
+        store.endSession(id: s1.id, at: t0.addingTimeInterval(120))
+
+        // NEXT sitting starts a small distance past the last capture: still NOT interpolated —
+        // there's no continuity evidence across sittings, however small the hole.
+        let s2 = store.startSession(bookID: "book", bookTitle: "Book", at: t0.addingTimeInterval(86_400))
+        store.appendPage(text: "next sitting's first page long enough for dedup", dHash: 0xFFFF_0000,
+                         at: t0.addingTimeInterval(86_460), to: s2.id,
+                         alignment: .init(wordRange: 1700..<2000, confidence: 0.9, progress: 0.2))
+        XCTAssertEqual(store.coveredRanges(forBook: "book"), [0..<300, 1200..<1500, 1700..<2000],
+                       "the 200-word hole between sittings stays uncovered — that's the assertion's job")
     }
 
     // MARK: - Recap progress (P4)

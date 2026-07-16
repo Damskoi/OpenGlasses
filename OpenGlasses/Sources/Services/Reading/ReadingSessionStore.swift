@@ -100,10 +100,50 @@ final class ReadingSessionStore: ObservableObject {
         return reference.assertedReadUpTo
     }
 
+    /// The reference ranges the reader has covered, for retrieval grounding: asserted region +
+    /// captured pages + **interpolated small holes**. Interpolation is deliberately narrow: a hole
+    /// is covered only when it's smaller than `interpolationLimit` words AND flanked by aligned
+    /// captures from the *same sitting* — the camera witnessed that sitting's continuity and
+    /// merely blinked on a page (blur, empty OCR, a false dedup drop). Holes between sittings
+    /// never interpolate, however small: there's no continuity evidence across a gap in time —
+    /// that's what the catch-up assertion is for. Nothing here can exceed the camera frontier:
+    /// every input range is at or behind it by construction.
+    func coveredRanges(forBook bookID: String, interpolationLimit: Int = 800) -> [Range<Int>] {
+        guard let reference = references[bookID] else { return [] }
+        var ranges: [Range<Int>] = []
+        if let asserted = reference.assertedReadUpTo, asserted > 0 {
+            ranges.append(0..<asserted)
+        }
+        for session in sessions where session.bookID == bookID {
+            let aligned = session.pages.compactMap(\.alignedRange).sorted { $0.lowerBound < $1.lowerBound }
+            guard var current = aligned.first else { continue }
+            for next in aligned.dropFirst() {
+                if next.lowerBound <= current.upperBound + interpolationLimit {
+                    current = current.lowerBound..<max(current.upperBound, next.upperBound)
+                } else {
+                    ranges.append(current)
+                    current = next
+                }
+            }
+            ranges.append(current)
+        }
+        // Merge overlaps across sources (no interpolation here — touching/overlapping only).
+        var merged: [Range<Int>] = []
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
     /// The largest stretch behind the frontier that is neither camera-witnessed nor asserted —
     /// chapters read away from the app, or genuinely skipped. `nil` when there's no meaningful
     /// hole. This is what lets the assistant *ask* instead of wrongly answering "that hasn't
-    /// come up yet" about a chapter the reader finished on the couch.
+    /// come up yet" about a chapter the reader finished on the couch. (Small same-sitting holes
+    /// are auto-covered by `coveredRanges` interpolation and sit below this floor anyway.)
     func unconfirmedGap(forBook bookID: String, minimumWords: Int = 1500) -> Range<Int>? {
         guard let reference = references[bookID],
               alignedFrontier(forBook: bookID) != nil else { return nil }
