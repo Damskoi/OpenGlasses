@@ -995,8 +995,16 @@ class AppState: ObservableObject, AppStateProtocol {
         StudyService.shared.configure(llm: llmService, documentStore: documentStore, tts: speechService, camera: cameraService)
 
         // Reading companion (Plan BT) — camera frames for page turns, Study Mode for the
-        // end-of-session deck, TTS for the recap.
+        // end-of-session deck.
         ReadingCompanionService.shared.configure(camera: cameraService, study: StudyService.shared)
+        // Lets end() give the camera back the way it found it without stopping a stream some
+        // other feature is mid-way through using (same consumer set LivePreviewView checks).
+        ReadingCompanionService.shared.otherStreamConsumersActive = { [weak self] in
+            guard let self else { return false }
+            return self.videoRecorder.isRecording || self.broadcastService.isBroadcasting
+                || self.webRTCStreaming.isStreaming || self.geminiLiveSession.isActive
+                || self.openAIRealtimeSession.isActive
+        }
 
         // Skill Self-Evolution (Plan AW) — give the loop its LLM analyzer. The capture hook
         // (NativeToolRouter) feeds tool-error samples; this completes the loop so proposals reach the

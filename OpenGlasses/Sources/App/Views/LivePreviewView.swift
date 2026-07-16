@@ -181,7 +181,8 @@ struct LivePreviewView: View {
                     appState.broadcastService.isBroadcasting ||
                     appState.webRTCStreaming.isStreaming ||
                     appState.geminiLiveSession.isActive ||
-                    appState.openAIRealtimeSession.isActive
+                    appState.openAIRealtimeSession.isActive ||
+                    ReadingCompanionService.shared.isActive
                 if !shouldKeepStreaming {
                     await appState.cameraService.stopStreaming()
                 }

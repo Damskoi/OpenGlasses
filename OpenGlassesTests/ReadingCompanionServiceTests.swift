@@ -213,18 +213,23 @@ final class ReadingCompanionServiceTests: XCTestCase {
         now = t0.addingTimeInterval(1800)
         let recap = await service.end()
 
-        // Deck generation is scoped to this sitting's pages, with the spoiler-scoped prompt.
+        // The recap itself is deterministic and immediate — a slow model must never eat it (the
+        // tool router times out at 30s). The deck is the artifact that may lag.
+        XCTAssertTrue(recap.contains("1 page of The Hobbit"))
+        XCTAssertTrue(recap.contains("You finished on:"))
+        XCTAssertTrue(recap.contains("study deck"), "the recap should say a deck is coming")
+
+        // Deck generation runs in the background, scoped to this sitting's pages with the
+        // spoiler-scoped prompt.
+        await service.deckGenerationTask?.value
         XCTAssertEqual(deckCalls.count, 1)
         XCTAssertTrue(deckCalls[0].system.contains("only the pages they read in this sitting"))
         XCTAssertTrue(deckCalls[0].text.contains("page text number 1"))
         XCTAssertEqual(deckCalls[0].source, "Reading: The Hobbit")
 
-        XCTAssertTrue(recap.contains("Bilbo left the Shire."))
-        XCTAssertTrue(recap.contains("- Met the dwarves"))
-
         XCTAssertEqual(notes.count, 1)
         XCTAssertEqual(notes[0].1, ["reading", "The Hobbit"])
-        XCTAssertTrue(notes[0].0.contains("Bilbo left the Shire."))
+        XCTAssertTrue(notes[0].0.contains("1 page of The Hobbit"))
 
         // The brain gets the *activity*, never the prose — its extractor can't tell a novel's
         // characters from the reader's actual colleagues.
@@ -285,6 +290,36 @@ final class ReadingCompanionServiceTests: XCTestCase {
     func testWhereWasINilWithNoHistory() {
         let (service, _) = makeService()
         XCTAssertNil(service.whereWasI())
+    }
+
+    // MARK: - Book resolution
+
+    /// Review finding: exact-slug matching forked books — "Hobbit" after "The Hobbit" denied the
+    /// history the store actually had, or worse, split the corpus across two IDs forever.
+    func testSpokenTitleVariantsResolveToTheSameBook() {
+        let (service, store) = makeService()
+        store.startSession(bookID: "the-hobbit", bookTitle: "The Hobbit", at: t0)
+
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "The Hobbit"), "the-hobbit")
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "Hobbit"), "the-hobbit")
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "hobbit!"), "the-hobbit")
+    }
+
+    /// The reverse direction too: shelf has the short form, reader speaks the long one.
+    func testArticledTitleResolvesToArticlelessShelfEntry() {
+        let (service, store) = makeService()
+        store.startSession(bookID: "hobbit", bookTitle: "Hobbit", at: t0)
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "The Hobbit"), "hobbit")
+    }
+
+    /// No substring matching, ever — "Dune" is not "Dune Messiah", and collapsing a series into
+    /// one corpus would be a spoiler-rule violation in the other direction.
+    func testSeriesTitlesStayDistinctBooks() {
+        let (service, store) = makeService()
+        store.startSession(bookID: "dune-messiah", bookTitle: "Dune Messiah", at: t0)
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "Dune"), "dune")
+        XCTAssertEqual(service.resolveBookID(forSpokenTitle: "A Dune Messiah Companion"),
+                       "a-dune-messiah-companion")
     }
 }
 

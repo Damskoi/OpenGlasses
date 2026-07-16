@@ -130,6 +130,21 @@ final class ReadingContextBuilderTests: XCTestCase {
         XCTAssertTrue(block.hasSuffix("…"), "a cut page must be marked as cut")
     }
 
+    /// Review finding: one giant unbroken token made the word-boundary cut land on the space
+    /// inside the "[p1] " label, shipping a bare page number with zero content — the exact
+    /// rule-with-no-evidence state the builder exists to prevent.
+    func testUnbrokenTokenPageStillShipsContentNotABareLabel() throws {
+        let budget = 1500
+        let block = try XCTUnwrap(ReadingContextBuilder.block(
+            bookTitle: "Book", pages: [page(0, String(repeating: "x", count: 20_000))],
+            budgetCharacters: budget))
+        XCTAssertLessThanOrEqual(block.count, budget)
+        let verbatimLine = try XCTUnwrap(block.split(separator: "\n").first { $0.hasPrefix("[p1]") })
+        XCTAssertGreaterThan(verbatimLine.count, 200,
+                             "the page's content must ship, not just its label: \(verbatimLine.prefix(40))…")
+        XCTAssertTrue(verbatimLine.contains("xxxx"))
+    }
+
     func testBudgetIsRespectedAcrossAWideRangeOfSizes() {
         let corpus = pages(80)
         for budget in stride(from: 700, through: 20_000, by: 331) {

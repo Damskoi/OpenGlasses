@@ -143,23 +143,33 @@ enum SiriContentAdapters {
         }
     }
 
+    /// Excerpt cap for a donated reading session, matching the playbook adapter's posture. Recall
+    /// ("the Hobbit I read on Tuesday") rides the title/keywords/date; donating the whole corpus
+    /// meant every foreground refresh re-joined and SHA256-hashed a forever-growing body of prose —
+    /// and put verbatim pages of whatever the user reads into the system index.
+    static let readingSessionExcerptLimit = 500
+
     /// One record per sitting, so "the Hobbit I read on Tuesday" is findable (Plan BT). The text is
-    /// the reader's own captured pages — their book, their camera — which is why this is default-on
-    /// where conversations and field sessions aren't. Sessions with no readable pages are skipped:
-    /// a Spotlight hit with nothing behind it is worse than no hit.
+    /// a bounded excerpt of the reader's own captured pages — their book, their camera — which is
+    /// why this is default-on where conversations and field sessions aren't. Sessions with no
+    /// readable pages are skipped: a Spotlight hit with nothing behind it is worse than no hit.
     static func readingSessions(_ sessions: [ReadingSession]) -> [IndexableRecord] {
         sessions.compactMap { session in
-            let text = session.pages
-                .sorted { $0.pageIndex < $1.pageIndex }
-                .map { ReadingText.normalized($0.text) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
+            // Stop normalizing once the excerpt is full — this runs for every session on every
+            // index refresh, so the work has to be bounded, not just the output.
+            var text = ""
+            for page in session.pages.sorted(by: { $0.pageIndex < $1.pageIndex }) {
+                let normalized = ReadingText.normalized(page.text)
+                guard !normalized.isEmpty else { continue }
+                text += (text.isEmpty ? "" : "\n") + normalized
+                if text.count >= readingSessionExcerptLimit { break }
+            }
             guard !text.isEmpty else { return nil }
             return IndexableRecord(
                 contentType: .readingSession,
                 itemId: session.id,
                 title: "\(session.bookTitle) — \(session.pages.count) page\(session.pages.count == 1 ? "" : "s")",
-                text: text,
+                text: String(text.prefix(readingSessionExcerptLimit)),
                 keywords: ["reading", "book", session.bookTitle],
                 date: session.startedAt
             )

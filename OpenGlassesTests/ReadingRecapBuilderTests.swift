@@ -62,6 +62,19 @@ final class ReadingRecapBuilderTests: XCTestCase {
         XCTAssertTrue(solid.contains("about 2 minutes a page"))
     }
 
+    /// Review findings: exactly one minute a page spoke "1 minutes"; and the seconds branch
+    /// quantized through tenths of a minute first, turning a true 15s pace into "18 seconds".
+    func testPaceGrammarAndSecondsPrecision() throws {
+        let oneMinute = try XCTUnwrap(ReadingRecapBuilder.resumeRecap(
+            stats: stats(pages: 10, minutes: 10), lastPageText: nil))
+        XCTAssertTrue(oneMinute.contains("about 1 minute a page"), oneMinute)
+        XCTAssertFalse(oneMinute.contains("1 minutes"), oneMinute)
+
+        let fast = try XCTUnwrap(ReadingRecapBuilder.resumeRecap(
+            stats: stats(pages: 12, minutes: 3), lastPageText: nil))
+        XCTAssertTrue(fast.contains("about 15 seconds a page"), fast)
+    }
+
     func testResumeRecapReadsBackTheEndOfThePageNotTheStart() throws {
         // The reader stopped at the bottom of the page — that's the line that places them.
         let long = String(repeating: "earlier words ", count: 60) + "and then the door opened."

@@ -123,6 +123,39 @@ says so explicitly, and the context builder physically cannot include unread tex
   in the BQ Spotlight index as a new content type (default on; text is the reader's own
   captured pages).
 
+## P2.1 — Review remediation (2026-07-16) — ✅ shipped
+
+A multi-angle adversarial review of P1+P2 confirmed ten findings; all fixed in one PR:
+- **Gemini Live got the reading context** — the tool was declared there but the corpus/spoiler
+  rule never reached its instruction, so Live-mode book questions were answered from world
+  knowledge. Injected in `buildSystemInstruction` (refreshes on connect/reconnect; the rule is
+  present from session start). OpenAI Realtime declares no tools, so it was never exposed.
+- **`end()` recap is deterministic and immediate** — it awaited LLM deck generation *after*
+  tearing down state, inside the router's 30s tool timeout; a slow model ate the recap and a
+  retry answered "no session running". Deck now builds in a background task
+  (`deckGenerationTask`); the spoken recap no longer carries the deck overview.
+- **HIPAA position** — `reading_session` added to `hipaaDisabledTools` + a service-level start
+  guard (a "book" can be a patient chart); the store applies complete file protection + backup
+  exclusion under `hipaaMode` for data captured before the mode was enabled.
+- **Camera lifecycle** — `start()` surfaces `startStreaming` failures instead of announcing
+  "I'll follow along" over a dead camera; `end()` stops a stream the session started (unless
+  another consumer is live — `otherStreamConsumersActive` seam); mid-session stream death now
+  triggers one restart attempt and, failing that, `streamInterrupted` surfaces in status/end;
+  reading added to `LivePreviewView`'s keep-streaming list.
+- **Store integrity** — hash-only dedup restricted to the last 8 pages (a 9×8-dhash collision
+  between dense prose pages silently dropped a real page; text corroboration still corpus-wide),
+  `dedupDropCount` diagnostic added; `pageIndex` is max+1 (count collided after deleting a
+  non-terminal session) with a `capturedAt` sort tiebreaker; page appends coalesce into a 60s
+  checkpoint (lifecycle events persist immediately) instead of rewriting the whole corpus per
+  page turn on the main actor.
+- **Book identity** — spoken titles resolve against the shelf (exact slug, then leading-article
+  stripped) so "Hobbit" continues "The Hobbit" instead of forking a second corpus; deliberately
+  no substring matching ("Dune" must not collapse into "Dune Messiah").
+- **Smaller**: Spotlight donates a 500-char excerpt (was the full corpus, re-hashed every
+  foreground); `pagesThisSession` is derived, not stored; pace line grammar/rounding
+  ("1 minute", seconds from the true pace); context truncation no longer degenerates to a bare
+  "[pN]…" on an unbroken token; explicit `status` tool case.
+
 ## P3 / PR3 — Polish + HUD (device-gated)
 
 - Reading stats surface: per-book progress view (sessions, pace, streaks) in the app.

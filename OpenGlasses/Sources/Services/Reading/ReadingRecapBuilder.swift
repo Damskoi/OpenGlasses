@@ -97,11 +97,15 @@ enum ReadingRecapBuilder {
         guard stats.pageCount >= 3, stats.totalMinutes >= 1, stats.pagesPerMinute > 0 else { return nil }
         let minutesPerPage = 1 / stats.pagesPerMinute
         guard minutesPerPage >= 0.1, minutesPerPage < 60 else { return nil }
+        // Seconds come straight from the true pace — routing through tenths of a minute first
+        // turned a 15-second page into a spoken "18 seconds".
+        if minutesPerPage < 0.95 {
+            let seconds = Int((minutesPerPage * 60).rounded())
+            return "That's about \(seconds) second\(plural(seconds)) a page."
+        }
         let rounded = (minutesPerPage * 10).rounded() / 10
-        let value = rounded < 1
-            ? "\(Int((rounded * 60).rounded())) seconds"
-            : "\(rounded.formatted(.number.precision(.fractionLength(0...1)))) minutes"
-        return "That's about \(value) a page."
+        let value = rounded.formatted(.number.precision(.fractionLength(0...1)))
+        return "That's about \(value) minute\(rounded == 1 ? "" : "s") a page."
     }
 
     private static func excerptSentence(_ text: String?, lead: String) -> String? {

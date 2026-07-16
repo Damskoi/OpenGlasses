@@ -163,4 +163,88 @@ final class ReadingSessionStoreTests: XCTestCase {
         XCTAssertNil(store.stats(forBook: "a"))
         XCTAssertEqual(store.books().map(\.id), ["b"])
     }
+
+    /// Review finding: count-based numbering collided after deleting a non-terminal session —
+    /// A(0,1) + B(2,3), delete A, and the next append minted a second pageIndex 2.
+    func testPageIndexDoesNotCollideAfterDeletingAnEarlierSession() {
+        let store = ReadingSessionStore(directory: tempDir())
+        let a = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: pageText("a1"), dHash: 0x1, at: at(1), to: a.id)
+        store.appendPage(text: pageText("a2"), dHash: 0xFF00, at: at(2), to: a.id)
+        store.endSession(id: a.id, at: at(3))
+        let b = store.startSession(bookID: "book", bookTitle: "Book", at: at(10))
+        store.appendPage(text: pageText("b1"), dHash: 0xFFFF_0000, at: at(11), to: b.id)
+        store.appendPage(text: pageText("b2"), dHash: 0x00FF_00FF_0000_0000, at: at(12), to: b.id)
+
+        store.deleteSession(id: a.id)
+        store.appendPage(text: pageText("b3"), dHash: 0xF0F0_F0F0_0000_0000, at: at(13), to: b.id)
+
+        let indices = store.pages(forBook: "book").map(\.pageIndex)
+        XCTAssertEqual(indices, [2, 3, 4], "numbering must continue past the survivors, not reuse 2")
+        XCTAssertEqual(Set(indices).count, indices.count, "no duplicate page numbers")
+    }
+
+    /// Review finding: a bare 9×8-dhash match against the WHOLE book can be a layout collision
+    /// between two dense prose pages, silently dropping a real page. Hash-only dedup is therefore
+    /// recency-bounded; an old page needs the text to corroborate.
+    func testHashOnlyDedupIsRecencyBounded() {
+        let store = ReadingSessionStore(directory: tempDir(), duplicateHashDistance: 2)
+        let s = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        // Page 0 with hash H, then 8 more pages pushing it out of the recency window.
+        store.appendPage(text: pageText("p0"), dHash: 0x0000_0000_0000_0000, at: at(1), to: s.id)
+        let spread: [UInt64] = [0x00FF, 0xFF00_0000, 0x0F0F_0F0F_0F0F_0F0F, 0xF0F0_F0F0_F0F0_F0F0,
+                                0xFFFF_0000_0000_FFFF, 0x1111_1111_1111_1111, 0x2222_2222_2222_2222,
+                                0x4444_4444_4444_4444]
+        for (i, h) in spread.enumerated() {
+            store.appendPage(text: pageText("p\(i + 1)"), dHash: h, at: at(Double(i + 2)), to: s.id)
+        }
+        XCTAssertEqual(store.pages(forBook: "book").count, 9)
+
+        // New page whose hash collides with page 0 (distance 1) but whose text is entirely new:
+        // page 0 is out of the hash window and the text disagrees, so this must be accepted.
+        let accepted = store.appendPage(text: pageText("a genuinely different new page"),
+                                        dHash: 0x0000_0000_0000_0001, at: at(20), to: s.id)
+        XCTAssertNotNil(accepted, "an old-page hash collision must not silently drop a new page")
+
+        // But a hash match against a RECENT page (the re-look case, possibly with different OCR)
+        // still dedups on the hash alone.
+        XCTAssertNil(store.appendPage(text: pageText("re-look whose OCR came out different"),
+                                      dHash: 0x4444_4444_4444_4445, at: at(21), to: s.id),
+                     "a recent-page hash match is a re-look and must dedup")
+        XCTAssertEqual(store.dedupDropCount, 1)
+    }
+
+    /// Duplicate drops are counted — a silent drop was invisible to the P3 device diagnostics.
+    func testDedupDropCountIncrements() {
+        let store = ReadingSessionStore(directory: tempDir())
+        let s = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: pageText("one"), dHash: 0x1, at: at(1), to: s.id)
+        XCTAssertEqual(store.dedupDropCount, 0)
+        store.appendPage(text: pageText("one"), dHash: 0x1, at: at(2), to: s.id)   // exact re-look
+        XCTAssertEqual(store.dedupDropCount, 1)
+    }
+
+    /// Page appends coalesce into a checkpoint (review finding: a full-corpus rewrite per page
+    /// turn); lifecycle events flush immediately, so ending a session always lands on disk.
+    func testCheckpointFlushesOnEndSession() {
+        let dir = tempDir()
+        let store = ReadingSessionStore(directory: dir)   // default 60s checkpoint — not yet fired
+        let s = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: pageText("one"), dHash: 0x1, at: at(1), to: s.id)
+        store.endSession(id: s.id, at: at(2))             // flush
+
+        let reloaded = ReadingSessionStore(directory: dir)
+        XCTAssertEqual(reloaded.pages(forBook: "book").count, 1)
+    }
+
+    func testZeroCheckpointIntervalPersistsSynchronously() {
+        let dir = tempDir()
+        let store = ReadingSessionStore(directory: dir)
+        store.checkpointInterval = 0
+        let s = store.startSession(bookID: "book", bookTitle: "Book", at: t0)
+        store.appendPage(text: pageText("one"), dHash: 0x1, at: at(1), to: s.id)
+        // No endSession — the append alone must be on disk.
+        let reloaded = ReadingSessionStore(directory: dir)
+        XCTAssertEqual(reloaded.pages(forBook: "book").count, 1)
+    }
 }
