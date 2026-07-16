@@ -34,6 +34,8 @@ final class ReadingCompanionService: ObservableObject {
 
     var store: ReadingSessionStore = .shared
     weak var presence: PresenceMonitor?
+    /// In-lens recap card (P3). All display calls are safe no-ops without display hardware.
+    weak var glassesDisplay: GlassesDisplayService?
     private weak var camera: CameraService?
 
     /// Frame → recognized text. Set by `configure(...)`; tests inject a fake.
@@ -54,6 +56,14 @@ final class ReadingCompanionService: ObservableObject {
     /// a future UI spinner) can await completion.
     private(set) var deckGenerationTask: Task<Void, Never>?
 
+    /// documentId → the reference copy's full text (P4). Set by `configure(...)` to
+    /// `DocumentStore.fullText`; tests inject a fake.
+    var loadReferenceText: ((String) -> String?)?
+
+    /// Builds the page detector for each session. `configure(...)` points this at the Config
+    /// knobs (P3 device-pass tuning is then data-only); tests keep the deterministic default.
+    var makeDetector: () -> PageTurnDetector = { PageTurnDetector() }
+
     /// Injected clock — deterministic in tests.
     var clock: () -> Date = { Date() }
     /// Ceiling on the injected reading block. Sized for the on-device model, which is the tighter
@@ -64,6 +74,12 @@ final class ReadingCompanionService: ObservableObject {
     var minimumFrameInterval: TimeInterval = 0.5
 
     private var detector = PageTurnDetector()
+    /// The active book's reference index (P4), built off-main at session start when a copy is
+    /// attached. Pages captured before it's ready simply stay unaligned — raw OCR grounding,
+    /// exactly as without a reference.
+    private var alignmentIndex: BookAlignmentIndex?
+    /// Exposed so tests (and a future UI spinner) can await index readiness.
+    private(set) var alignmentPreparation: Task<Void, Never>?
     private var frameSubscription: AnyCancellable?
     private var streamStateSubscription: AnyCancellable?
     /// True when this session was the one that turned the camera stream on — `end()` then turns
@@ -82,12 +98,24 @@ final class ReadingCompanionService: ObservableObject {
     /// No TTS seam here on purpose: every entry point returns its line to `ReadingSessionTool`, and
     /// the assistant speaks tool results already. A `speak` closure would be a second, silent path
     /// to the same speaker.
-    func configure(camera: CameraService, study: StudyService) {
+    func configure(camera: CameraService, study: StudyService, documents: DocumentStore? = nil) {
         self.camera = camera
         self.ocr = { image in
             guard let cg = image.cgImage else { return "" }
             return await OCRService().recognizeText(in: cg).text
         }
+        self.loadReferenceText = { [weak documents] documentId in
+            documents?.fullText(documentId: documentId)
+        }
+        // The detector reads the Config knobs per session (P3): the device pass retunes with
+        // `defaults write`, not a rebuild. Tests never call configure, keeping the fixed defaults.
+        self.makeDetector = {
+            PageTurnDetector(
+                gate: FrameGate(hammingThreshold: Config.readingHammingThreshold,
+                                heartbeat: 0, adaptiveEnabled: false),
+                stabilityWindow: Config.readingStabilityWindowSeconds)
+        }
+        self.minimumFrameInterval = Config.readingMinimumFrameInterval
         self.generateDeck = { [weak study] systemPrompt, text, source in
             try? await study?.makeDeck(fromText: text, source: source, systemPrompt: systemPrompt)
         }
@@ -140,16 +168,19 @@ final class ReadingCompanionService: ObservableObject {
         // in "across N sittings" and the reader would hear a sitting they haven't had yet.
         let recap = store.stats(forBook: bookID).flatMap { stats in
             ReadingRecapBuilder.resumeRecap(
-                stats: stats, lastPageText: store.pages(forBook: bookID).last?.text)
+                stats: stats, lastPageText: store.pages(forBook: bookID).last?.text,
+                progress: store.progress(forBook: bookID))
         }
+        showRecapCard(forBook: bookID)
 
+        prepareAlignment(forBook: bookID)
         let session = store.startSession(bookID: bookID, bookTitle: title, at: clock())
         activeSessionID = session.id
         unreadableCaptures = 0
         streamInterrupted = false
         isActive = true
         isPaused = false
-        detector.reset()
+        detector = makeDetector()
         lastEvaluatedAt = nil
 
         subscribeToFrames()
@@ -194,6 +225,11 @@ final class ReadingCompanionService: ObservableObject {
         frameSubscription = nil
         streamStateSubscription?.cancel()
         streamStateSubscription = nil
+        alignmentPreparation?.cancel()
+        alignmentPreparation = nil
+        // Kept past teardown so this sitting's deck builds from canonical slices (P4).
+        let reference = alignmentIndex
+        alignmentIndex = nil
         store.endSession(id: sessionID, at: clock())
         isActive = false
         isPaused = false
@@ -230,7 +266,7 @@ final class ReadingCompanionService: ObservableObject {
         ingestBrainFact?("Read \(session.pages.count) page(s) of \(session.bookTitle).",
                          session.bookTitle)
 
-        if let text = ReadingRecapBuilder.deckSource(session: session), let generateDeck {
+        if let text = ReadingRecapBuilder.deckSource(session: session, reference: reference), let generateDeck {
             let systemPrompt = ReadingRecapBuilder.deckSystemPrompt(bookTitle: session.bookTitle)
             let source = "Reading: \(session.bookTitle)"
             deckGenerationTask = Task {
@@ -243,14 +279,49 @@ final class ReadingCompanionService: ObservableObject {
         return recap
     }
 
+    // MARK: - Reference alignment (P4)
+
+    /// Build the alignment index off-main when this book has a copy attached. Pages captured
+    /// before it's ready stay unaligned — raw OCR grounding, exactly as without a reference.
+    private func prepareAlignment(forBook bookID: String) {
+        alignmentIndex = nil
+        alignmentPreparation = nil
+        guard let reference = store.reference(forBook: bookID),
+              let text = loadReferenceText?(reference.documentId), !text.isEmpty else { return }
+        alignmentPreparation = Task { [weak self] in
+            // Index construction is pure CPU over the whole book — off the main actor.
+            let index = await Task.detached(priority: .utility) { BookAlignmentIndex(text: text) }.value
+            guard let self, !Task.isCancelled else { return }
+            // Only the session that asked for it may install it.
+            guard self.isActive, self.activeSession?.bookID == bookID else { return }
+            self.alignmentIndex = index
+        }
+    }
+
+    // MARK: - HUD (P3)
+
+    /// Flash the recap card on the in-lens display. Transient by design: it flashes over whatever
+    /// card is held (Now/Next, launcher) and the display restores itself — reading never manages
+    /// display state. Safe no-op without display hardware or with the HUD disabled.
+    private func showRecapCard(forBook bookID: String) {
+        guard let glassesDisplay, let stats = store.stats(forBook: bookID) else { return }
+        let streak = ReadingStreaks.current(
+            sessionDates: store.sessions(forBook: bookID).map(\.startedAt), today: clock())
+        guard let content = ReadingHUDCard.notification(
+            stats: stats, progress: store.progress(forBook: bookID), streak: streak) else { return }
+        glassesDisplay.showNotification(title: content.title, body: content.body, icon: .info, duration: 6)
+    }
+
     // MARK: - Q&A
 
     /// "Where was I?" — answerable any time, without a live session.
     func whereWasI(bookID: String? = nil) -> String? {
         let book = bookID ?? activeSession?.bookID ?? store.books().first?.id
         guard let book, let stats = store.stats(forBook: book) else { return nil }
+        showRecapCard(forBook: book)
         return ReadingRecapBuilder.resumeRecap(
-            stats: stats, lastPageText: store.pages(forBook: book).last?.text)
+            stats: stats, lastPageText: store.pages(forBook: book).last?.text,
+            progress: store.progress(forBook: book))
     }
 
     /// The grounding block for this turn, or `nil` when no session is live — the house
@@ -262,12 +333,37 @@ final class ReadingCompanionService: ObservableObject {
     /// nil is what gates it — the same reasoning the playbook context already runs on. Injecting at
     /// `buildSystemPrompt` also means local, cloud and cloud-agent paths are covered by one line,
     /// where a threaded parameter would inherit the two paths that silently drop `weatherContext`.
-    func promptContext() -> String? {
+    func promptContext(turn: String? = nil) -> String? {
         guard isActive, let session = activeSession else { return nil }
         return ReadingContextBuilder.block(
             bookTitle: session.bookTitle,
             pages: store.pages(forBook: session.bookID),
-            budgetCharacters: contextBudgetCharacters)
+            budgetCharacters: contextBudgetCharacters,
+            reference: alignmentIndex,
+            assertedReadUpTo: store.reference(forBook: session.bookID)?.assertedReadUpTo,
+            retrievalRanges: store.coveredRanges(forBook: session.bookID),
+            unconfirmedGap: store.unconfirmedGap(forBook: session.bookID),
+            turn: turn)
+    }
+
+    /// "I've read up to here" — count everything before the current camera-proven position as
+    /// read (P4 catch-up: started the app mid-book, or read offline between sittings). Returns
+    /// the spoken confirmation or the reason it couldn't be recorded.
+    func assertCaughtUp(bookID: String? = nil) -> String {
+        guard let book = bookID ?? activeSession?.bookID ?? store.books().first?.id else {
+            return "I don't have a book on the shelf yet — say \"start reading\" with the title first."
+        }
+        guard store.reference(forBook: book) != nil else {
+            return "That works once a copy of the book is attached — add one under Settings → Reading."
+        }
+        guard store.assertCaughtUp(forBook: book) != nil else {
+            return "Let me see a page first so I know where you are, then say that again."
+        }
+        if let progress = store.progress(forBook: book) {
+            let percent = min(100, max(1, Int((progress * 100).rounded())))
+            return "Got it — everything up to here counts as read. That's about \(percent)% of the book."
+        }
+        return "Got it — everything up to here counts as read."
     }
 
     // MARK: - Book identity
@@ -359,7 +455,11 @@ final class ReadingCompanionService: ObservableObject {
                 unreadableCaptures += 1
                 return
             }
-            store.appendPage(text: text, dHash: hash, at: capturedAt, to: sessionID)
+            // Locate the capture in the reference copy when one is attached (P4). Alignment is
+            // best-effort: a miss just means this page grounds on its raw OCR.
+            let alignment = alignmentIndex?.align(captureText: text)
+            store.appendPage(text: text, dHash: hash, at: capturedAt, to: sessionID,
+                             alignment: alignment)
         }
     }
 }

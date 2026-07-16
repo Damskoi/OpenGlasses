@@ -10,16 +10,65 @@ import Foundation
 struct PageCapture: Codable, Equatable, Identifiable {
     let id: String
     let pageIndex: Int
+    /// The raw OCR text, always kept even when the page is aligned to a reference copy — raw is
+    /// what dedup compares, and keeping it makes alignment re-runnable and reversible (P4).
     let text: String
     let capturedAt: Date
     let dHash: UInt64
 
-    init(id: String = UUID().uuidString, pageIndex: Int, text: String, capturedAt: Date, dHash: UInt64) {
+    /// Where this capture sits in the book's reference copy, in reference word positions —
+    /// `nil` when no reference is attached or the page didn't match (P4). Optionals so P1/P2
+    /// data decodes unchanged.
+    let alignedStart: Int?
+    let alignedWordCount: Int?
+    let alignedConfidence: Double?
+
+    init(id: String = UUID().uuidString, pageIndex: Int, text: String, capturedAt: Date, dHash: UInt64,
+         alignedStart: Int? = nil, alignedWordCount: Int? = nil, alignedConfidence: Double? = nil) {
         self.id = id
         self.pageIndex = pageIndex
         self.text = text
         self.capturedAt = capturedAt
         self.dHash = dHash
+        self.alignedStart = alignedStart
+        self.alignedWordCount = alignedWordCount
+        self.alignedConfidence = alignedConfidence
+    }
+
+    var alignedRange: Range<Int>? {
+        guard let alignedStart, let alignedWordCount, alignedWordCount > 0 else { return nil }
+        return alignedStart..<(alignedStart + alignedWordCount)
+    }
+}
+
+/// A user-supplied canonical copy of a book (P4) — a pointer into the Plan O `DocumentStore`,
+/// never a second copy of the text. If the user later forgets the document there, alignment
+/// quietly stops and reading falls back to raw OCR grounding.
+struct BookReference: Codable, Equatable {
+    let bookID: String
+    let documentId: String
+    let documentName: String
+    /// Reference length in words (the alignment tokenization), persisted so progress can be
+    /// derived from stored alignments without loading the book text.
+    let wordCount: Int
+    let attachedAt: Date
+
+    /// "I've read up to here" — the reader's assertion, in reference word positions, covering
+    /// stretches read *away from the glasses* (started the app mid-book, read offline between
+    /// sittings). A single high-water mark suffices: assertions are cumulative and monotonic.
+    /// Always clamped to the camera-proven frontier when set, so it can only ever fill in
+    /// *behind* what the camera has witnessed — never unlock text ahead of it. `nil` = the
+    /// corpus is exactly what the camera saw. Optional so P4 data decodes unchanged.
+    var assertedReadUpTo: Int?
+
+    init(bookID: String, documentId: String, documentName: String, wordCount: Int,
+         attachedAt: Date, assertedReadUpTo: Int? = nil) {
+        self.bookID = bookID
+        self.documentId = documentId
+        self.documentName = documentName
+        self.wordCount = wordCount
+        self.attachedAt = attachedAt
+        self.assertedReadUpTo = assertedReadUpTo
     }
 }
 
@@ -72,6 +121,33 @@ struct ReadingStats: Equatable {
     let totalMinutes: Double
     let pagesPerMinute: Double
     let lastReadAt: Date?
+}
+
+/// Reading-day streaks for the P3 stats surface. Pure — calendar and "today" injected.
+enum ReadingStreaks {
+
+    /// Consecutive calendar days with at least one session, counting back from today. The streak
+    /// survives until a full day is missed: reading yesterday but not yet today still counts
+    /// (the reader hasn't broken anything — the day isn't over), so the answer can't discourage
+    /// tonight's sitting.
+    static func current(sessionDates: [Date], calendar: Calendar = .current, today: Date = Date()) -> Int {
+        guard !sessionDates.isEmpty else { return 0 }
+        let days = Set(sessionDates.map { calendar.startOfDay(for: $0) })
+        var cursor = calendar.startOfDay(for: today)
+        if !days.contains(cursor) {
+            // No sitting yet today — the streak may still be alive through yesterday.
+            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: cursor),
+                  days.contains(yesterday) else { return 0 }
+            cursor = yesterday
+        }
+        var streak = 0
+        while days.contains(cursor) {
+            streak += 1
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+            cursor = previous
+        }
+        return streak
+    }
 }
 
 /// Whitespace normalisation shared by the store's dedup and the context builder.

@@ -995,8 +995,10 @@ class AppState: ObservableObject, AppStateProtocol {
         StudyService.shared.configure(llm: llmService, documentStore: documentStore, tts: speechService, camera: cameraService)
 
         // Reading companion (Plan BT) — camera frames for page turns, Study Mode for the
-        // end-of-session deck.
-        ReadingCompanionService.shared.configure(camera: cameraService, study: StudyService.shared)
+        // end-of-session deck, DocumentStore for P4 reference copies, HUD for the recap card.
+        ReadingCompanionService.shared.configure(camera: cameraService, study: StudyService.shared,
+                                                 documents: documentStore)
+        ReadingCompanionService.shared.glassesDisplay = glassesDisplay
         // Lets end() give the camera back the way it found it without stopping a stream some
         // other feature is mid-way through using (same consumer set LivePreviewView checks).
         ReadingCompanionService.shared.otherStreamConsumersActive = { [weak self] in

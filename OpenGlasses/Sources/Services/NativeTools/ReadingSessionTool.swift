@@ -12,9 +12,11 @@ struct ReadingSessionTool: NativeTool {
     what the reader has actually read so far. Actions: start (begin a session; pass the book's \
     title as 'book'), pause (stop capturing pages for a moment), resume, end (finish the sitting — \
     speaks a recap, saves it as a note, and builds a study deck from this sitting's pages), \
-    where_was_i (where the reader left off, works between sessions), status. Use for "read along \
-    with me", "start reading The Hobbit", "where was I", "I'm done reading". Do NOT use this to \
-    answer questions about the book's content — those are answered from the reading context \
+    where_was_i (where the reader left off, works between sessions), caught_up (the reader read \
+    part of the book away from the glasses — "I've read up to here" counts everything before \
+    their current position as read), status. Use for "read along with me", "start reading The \
+    Hobbit", "where was I", "I've already read up to here", "I'm done reading". Do NOT use this \
+    to answer questions about the book's content — those are answered from the reading context \
     already in your prompt. Never reveal anything past the pages the reader has read.
     """
 
@@ -24,7 +26,7 @@ struct ReadingSessionTool: NativeTool {
             "properties": [
                 "action": [
                     "type": "string",
-                    "enum": ["start", "pause", "resume", "end", "where_was_i", "status"],
+                    "enum": ["start", "pause", "resume", "end", "where_was_i", "caught_up", "status"],
                     "description": "what to do"
                 ],
                 "book": [
@@ -77,6 +79,9 @@ struct ReadingSessionTool: NativeTool {
             let bookID = book.map { service.resolveBookID(forSpokenTitle: $0) }
             return service.whereWasI(bookID: bookID)
                 ?? "I haven't read anything with you yet."
+
+        case "caught_up":
+            return service.assertCaughtUp(bookID: book.map { service.resolveBookID(forSpokenTitle: $0) })
 
         // "status" is also the graceful floor for any action string the model invents — never
         // error a voice turn over an enum mismatch.

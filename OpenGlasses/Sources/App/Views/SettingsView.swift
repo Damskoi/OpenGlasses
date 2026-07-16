@@ -320,6 +320,12 @@ struct SettingsView: View {
                 }
 
                 NavigationLink {
+                    ReadingStatsView()
+                } label: {
+                    Label("Reading", systemImage: "book")
+                }
+
+                NavigationLink {
                     HealthVaultEditorView()
                 } label: {
                     HStack {

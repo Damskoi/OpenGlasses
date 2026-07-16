@@ -1,8 +1,9 @@
 # Plan BT — Reading Companion
 
-**Status: 🚧 P1 + P2 + P2.1 review remediation shipped (2026-07-16) — session core, live mode
-and Q&A wiring, headless throughout; device smoke owed. P3 planned; P4 (reference copy
-alignment) planned.** A continuous *reading session* vertical: the glasses
+**Status: 🚧 All phases shipped (P1–P4, 2026-07-16) — session core, live mode, Q&A wiring,
+review remediation, stats/HUD surface, reference-copy alignment; headless throughout. Device
+smoke owed and remains the real gate (OCR quality, thresholds, battery — plus the e-reader
+glare pass).** A continuous *reading session* vertical: the glasses
 read along with a physical book or e-reader, answer questions grounded in **what the
 reader has actually seen**, and turn each session into retention artifacts (recap, study
 deck) and reading stats. Every primitive already exists in this codebase — OCR (Plan A),
@@ -157,15 +158,75 @@ A multi-angle adversarial review of P1+P2 confirmed ten findings; all fixed in o
   ("1 minute", seconds from the true pace); context truncation no longer degenerates to a bare
   "[pN]…" on an unbroken token; explicit `status` tool case.
 
-## P3 / PR3 — Polish + HUD (device-gated)
+## P3 / PR3 — Polish + HUD — ✅ shipped (with P4, one PR)
 
-- Reading stats surface: per-book progress view (sessions, pace, streaks) in the app.
-- HUD: "where was I?" recap card + progress on the Display surface (rides Plan BP's
-  web-mirror when it lands; native DAT display already supported for Now/Next cards).
-- Kindle/e-reader specifics: screen glare/contrast OCR tuning — device-gated accuracy
-  pass (the detector/OCR thresholds are Config-tunable so the pass is data-only).
+**As-built notes:**
+- Stats surface: `ReadingStatsView` (Settings → Reading, the `DeckListView` precedent) — per-book
+  pages/sittings/time/pace/streak/last-read, swipe-to-delete books, per-sitting history, and the
+  P4 attach-a-copy controls. `ReadingStreaks.current` is pure (calendar + today injected); a
+  streak survives until a full day is missed — reading yesterday but not yet today still counts.
+- HUD: `ReadingHUDCard.notification` (pure) → `GlassesDisplayService.showNotification` on session
+  start and "where was I?". Transient by design: it flashes over whatever card is held (Now/Next,
+  launcher) and the display restores itself, so reading never manages display state. Safe no-op
+  without display hardware. A held interactive `HUDScreen` was rejected — it would suppress other
+  ambient content until manually ended.
+- Detector knobs are Config-backed (`readingHammingThreshold`/`readingStabilityWindowSeconds`/
+  `readingMinimumFrameInterval`, defaults 3 / 1.0s / 0.5s) via a `makeDetector` seam set in
+  `configure(...)` — the device pass retunes with `defaults write`, no rebuild; tests keep fixed
+  defaults because they never call configure. Code-only knobs, the `frameDedup*` posture.
+- The e-reader glare/contrast pass itself remains device-gated and owed — the knobs are its
+  prerequisite, not its substitute.
 
-## P4 / PR4 — Reference copy alignment (planned, 2026-07-16)
+## P4 / PR4 — Reference copy alignment — ✅ shipped (with P3, one PR)
+
+**As-built notes:**
+- `BookAlignmentIndex`: word-shingle voting (3-gram, non-distinctive shingles > 8 occurrences
+  dropped from the index), densest-cluster with the *modal* start inside the winning window — the
+  window's lowest vote could sit up to `clusterTolerance` early when a repeated phrase precedes
+  the true site. Case/punctuation-insensitive matching; slices return the book's own text.
+- Reference = a `BookReference` pointer into the Plan O `DocumentStore` (`fullText(documentId:)`,
+  the teleprompter precedent) persisted in its own `references.json` — the P1 sessions schema is
+  untouched and no text is duplicated. If the user forgets the document, alignment quietly stops.
+- `PageCapture` gains optional `alignedStart/alignedWordCount/alignedConfidence`; raw OCR is
+  always kept (dedup compares raw; alignment stays re-runnable). Old data decodes unchanged.
+- The index builds off-main at session start (`alignmentPreparation`); pages captured before it's
+  ready stay unaligned — raw OCR grounding, exactly as without a reference. Attach takes effect
+  next session.
+- Progress derives from stored alignments (`alignedFrontier` / `wordCount` persisted at attach),
+  so "where was I?" says "about 34% through" offline, without loading the book.
+- Attach supports **PDF** (PDFKit; no OCR, so scanned PDFs yield nothing), **EPUB**, and UTF-8
+  text, via file import or picking an existing DocumentStore document. EPUB is dependency-free:
+  `BookFileExtractor` owns a minimal read-only ZIP reader (`ZipArchiveReader` — central-directory
+  walk, stored + deflate via the system Compression framework; no ZIP64/encryption/CRC), walks
+  `container.xml` → OPF manifest+spine for reading order (archive-order HTML fallback when the
+  manifest is malformed), and strips XHTML to text (`HTMLTextStripper`). Fixtures in tests are
+  real ZIP bytes built by a stored-entry writer, plus a Compression-framework deflate round-trip.
+- Spoiler safety verified structurally in tests: canonical text one word past the camera-proven
+  frontier does not appear in the block.
+- **Small-hole interpolation:** one bounded inference exists, added deliberately: a hole smaller
+  than ~800 words flanked by aligned captures from the *same sitting* counts as covered — the
+  camera witnessed the sitting's continuity and merely blinked on a page (blur, empty OCR, a
+  false dedup drop). Holes between sittings never interpolate, however small (no continuity
+  evidence across time — that's the assertion's job), and nothing can exceed the frontier since
+  both flanks are camera-proven. Covered regions (asserted + captured + interpolated,
+  `coveredRanges`) are what retrieval searches.
+- **Catch-up ("I've read up to here"):** beyond that one bounded case, the corpus is
+  *witnessed-or-asserted*, never inferred.
+  A reader who starts the app mid-book (or reads offline between sittings — captures at chapters
+  1–3, a gap at 4–9, captures at 10+) can assert the earlier stretch as read: `assertedReadUpTo`
+  is a single monotonic high-water mark on `BookReference`, **clamped to the camera frontier** so
+  it only ever fills in behind what the camera proved, never ahead. Unasserted holes behind the
+  frontier are detected (`unconfirmedGap`) and surfaced to the model as an instruction to *ask*
+  ("did you read that part away from the glasses?") rather than wrongly answer "that hasn't come
+  up yet" — confirmation is one voice line (`caught_up` tool action, or the button in the stats
+  view). Asserted regions are grounded by retrieval, not inclusion: `BookAlignmentIndex.retrieve`
+  (deterministic keyword-window scoring, position-clamped to the mark, capped at a quarter of the
+  block budget) pulls the passages most relevant to the current turn, which `buildSystemPrompt`
+  now passes through. Auto-backfill from position alone was rejected: the frontier proves where
+  the reader *is*, not that they read linearly — a skipped middle must stay unanswerable until
+  the reader says otherwise.
+
+### Original plan (for reference, planned 2026-07-16)
 
 The user can supply their own copy of the book (PDF/EPUB, imported through the Plan O
 `DocumentStore` path — no second import pipeline) and the companion aligns each camera
