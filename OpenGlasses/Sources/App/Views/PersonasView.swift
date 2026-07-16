@@ -170,14 +170,14 @@ struct PersonaEditorView: View {
     let onSave: (Persona) -> Void
 
     @State private var name = ""
-    @State private var wakePhrase = "hey openglasses"
+    @State private var wakePhrase = "openglasses"
     @State private var wakeAlts = ""
     @State private var selectedModelId = ""
     @State private var selectedPresetId = "preset-default"
     @State private var enabled = true
 
     private let wakePhrasePresets = [
-        "hey openglasses", "hey claude", "hey jarvis", "hey rayban",
+        "openglasses", "hey openglasses", "hey claude", "hey jarvis", "hey rayban",
         "hey computer", "hey assistant", "hey gemini", "hey gpt"
     ]
 

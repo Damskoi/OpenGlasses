@@ -38,6 +38,37 @@ final class ConversationClassifierTests: XCTestCase {
         }
     }
 
+    /// Live-traced (calendar-for-tomorrow): the 2B local model only ever called calendar with
+    /// the default "today", then interrogated the user for a date, then denied having access.
+    /// Informational calendar questions now route deterministically with the right action.
+    func testCalendarLookupsMatchDirectlyWithDayAction() {
+        let cases: [(String, String)] = [
+            ("do i have anything in my calendar for tomorrow", "tomorrow"),
+            ("have i got anything on my calendar tomorrow", "tomorrow"),
+            ("what's on my schedule today", "today"),
+            ("do i have any meetings this week", "upcoming"),
+            ("what's my next meeting", "next"),
+            ("am i free tomorrow according to my calendar", "tomorrow"),
+        ]
+        for (query, action) in cases {
+            let result = classifier.classify(query)
+            XCTAssertEqual(result.directToolCall?.toolName, "calendar",
+                           "'\(query)' should directly call calendar")
+            XCTAssertEqual(result.directToolCall?.arguments["action"] as? String, action,
+                           "'\(query)' should pick action '\(action)'")
+        }
+    }
+
+    /// Creation and modification must still reach the LLM — they need title/time extraction.
+    func testCalendarMutationsDoNotMatchDirectly() {
+        for query in ["add a meeting to my calendar tomorrow at 3pm",
+                      "schedule a dentist appointment for tomorrow",
+                      "cancel my meeting tomorrow"] {
+            XCTAssertNil(classifier.classify(query).directToolCall,
+                         "'\(query)' must reach the LLM for extraction")
+        }
+    }
+
     func testMusicPauseMatchesDirectly() {
         let result = classifier.classify("pause")
         XCTAssertEqual(result.directToolCall?.toolName, "music_control")

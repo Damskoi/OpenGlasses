@@ -15,21 +15,25 @@ import XCTest
 /// routing input that decides the shape.
 final class LocalTokenShapeTests: XCTestCase {
 
-    func testGemma4AgentModelIsNotRoutedAsVision() {
-        // gemma-4-e2b is a text/agentic model: it must load through LLMModelFactory and
-        // therefore take the 1D path. If someone adds it to visionModelIds, prompts over
-        // the prefill step size fatally crash on device.
-        XCTAssertFalse(LocalLLMService.visionModelIds.contains("mlx-community/gemma-4-e2b-it-4bit"))
+    func testGemma4AttemptsVLMFactory() {
+        // Attempt-and-demote (2026-07-16): gemma-4 IS routed to VLMModelFactory first. The 1D-
+        // vs-(1,L) token shape that used to make this membership dangerous is now keyed off
+        // `loadedViaVLMFactory` — the factory that ACTUALLY loaded — so a demoted Gemma takes
+        // the 1D path automatically and the fatal shape mismatch cannot recur.
+        XCTAssertTrue(LocalLLMService.visionModelIds.contains("mlx-community/gemma-4-e2b-it-4bit"))
     }
 
     func testVisionModelIdsAreVLMFactoryModels() {
-        // Only the SmolVLM2 checkpoints load through VLMModelFactory and take the
-        // batched (1, L) token path; everything else must stay 1D.
+        // The VLM-factory attempt set: proven SmolVLM2 checkpoints plus the Gemma 4 family
+        // (both hub casings of e2b — the catalog uses lowercase, the community page capital).
         XCTAssertEqual(
             LocalLLMService.visionModelIds,
             [
                 "mlx-community/SmolVLM2-2.2B-Instruct-mlx",
                 "mlx-community/SmolVLM2-500M-Video-Instruct-mlx",
+                "mlx-community/gemma-4-e2b-it-4bit",
+                "mlx-community/gemma-4-E2B-it-4bit",
+                "mlx-community/gemma-4-e4b-it-4bit",
             ]
         )
     }

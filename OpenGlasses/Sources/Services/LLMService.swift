@@ -475,9 +475,18 @@ class LLMService: ObservableObject {
         // Vision honesty: a non-vision on-device model silently DROPS the image while the
         // vision prompt block insists "You CAN see images" — the model then invents a scene
         // (live-traced: described a cup that was never photographed). Refuse instead.
+        // Demotion-aware when the service is in hand: a Gemma whose VLM load fell back to the
+        // text factory would silently drop the image despite its architectural vision claim.
         if isOnDevice, imageData != nil,
-           provider == .appleOnDevice || !LocalLLMService.isVisionCapable(modelId: modelConfig.model) {
-            return "I can't look at photos with the current on-device model. Switch to a vision-capable local model like SmolVLM, or a cloud model, and try again."
+           provider == .appleOnDevice
+               || !(localLLMService?.isVisionUsable(modelId: modelConfig.model)
+                    ?? LocalLLMService.isVisionCapable(modelId: modelConfig.model)) {
+            // Don't recommend the very model being refused: a demoted Gemma is architecturally
+            // vision-capable but this build's vision weights wouldn't load on this device.
+            if provider != .appleOnDevice, LocalLLMService.isVisionCapable(modelId: modelConfig.model) {
+                return LocalLLMService.visionWeightsUnavailableMessage
+            }
+            return "I can't look at photos with the current on-device model. Switch to a vision-capable local model like SmolVLM2, or a cloud model, and try again."
         }
 
         let fullPrompt: String
@@ -2092,10 +2101,18 @@ class LLMService: ObservableObject {
         var answer = response.content
         if Config.localWebSearchFallbackEnabled,
            UncertaintyDetector.assess(question: text, answer: answer).shouldSearch {
+            // The Apple session is stateful (it holds its own transcript), so its rewrite is
+            // context-aware without an explicit history block; the shared conversationHistory
+            // still feeds the grounding prompt for cross-answer reconciliation.
+            let recent = recentTupleHistory(6, stripToolMarkup: false)
             answer = await UncertaintyReask.answer(
                 question: text,
                 originalAnswer: answer,
+                history: recent,
                 search: { query in try await WebSearchTool().execute(args: ["query": query]) },
+                rewriteQuery: { q in
+                    try await session.respond(to: "Rewrite this follow-up as ONE self-contained web search query, using our conversation for context. If it already stands alone, output it unchanged. Output only the query, nothing else: \(q)").content
+                },
                 regenerate: { grounding in try await session.respond(to: grounding).content }
             )
         }
@@ -2150,13 +2167,38 @@ class LLMService: ObservableObject {
 
     /// True when the reply narrates an intention to fetch/check something without any
     /// tool markup — the shape a small model produces instead of acting.
+    /// The last `n` history entries as (role, content) tuples — the shape the local paths and
+    /// UncertaintyReask consume. Optionally strips `<tool_call>` markup (local path keeps its
+    /// context clean; the Apple path's transcript never contains markup).
+    private func recentTupleHistory(_ n: Int, stripToolMarkup: Bool) -> [(role: String, content: String)] {
+        conversationHistory.suffix(n).compactMap { turn in
+            guard let role = turn["role"] as? String, var content = turn["content"] as? String else { return nil }
+            if stripToolMarkup {
+                content = content
+                    .replacingOccurrences(of: #"<tool_call>.*?</tool_call>"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return content.isEmpty ? nil : (role: role, content: content)
+        }
+    }
+
     nonisolated static func announcesToolIntent(_ response: String) -> Bool {
         let lowered = response.lowercased()
         guard !lowered.contains("<tool_call>") else { return false }
+        // A promise-instead-of-action reply is SHORT (a sentence or two). A long answer that
+        // merely contains "searching for"/"let me check" mid-prose is an answer, not a stall —
+        // without this gate the never-speak-a-promise net could discard valid replies.
+        guard lowered.count < 280 else { return false }
         let intentPhrases = [
             "looking up", "look that up", "look it up", "let me check", "i'll check",
             "i will check", "checking the", "let me get", "i'll get", "i'm getting",
             "fetching", "one moment", "just a moment", "i'm looking",
+            // Search-flavoured announcements (live-traced: "I will now search for popular
+            // tourist destinations in Samoa for you" — then silence). Anchored to first-person
+            // intent so an answer that merely mentions searching doesn't match.
+            "i will now search", "i will search", "i'll search", "let me search",
+            "i'm searching", "searching for", "i should have used a tool",
+            "i will use a tool", "using a tool to",
         ]
         return intentPhrases.contains { lowered.contains($0) }
     }
@@ -2190,6 +2232,11 @@ class LLMService: ObservableObject {
         if toolNames.contains("where_am_i") {
             block += "\nIf you need the user's location and it isn't given above, call where_am_i — never say you lack location access and never ask the user where they are."
         }
+        if toolNames.contains("calendar") {
+            // Live-traced: without the argument schema the model only ever got the default
+            // ("today"), asked the user for dates it couldn't use, then denied having access.
+            block += "\ncalendar arguments: {\"action\": \"today\" | \"tomorrow\" | \"next\" | \"upcoming\"} — pick the one matching the day asked about. You DO have the user's calendar through this tool; never claim you lack calendar access and never ask for a date when one of these actions fits."
+        }
         return block
     }
 
@@ -2218,19 +2265,7 @@ class LLMService: ObservableObject {
         // Build history — last 3 exchanges for local models (context is precious; the
         // LocalModelBudget cap still guards the ceiling). Was 2 — too short for a
         // follow-up that references the answer before last.
-        let recentHistory = conversationHistory.suffix(6)
-        var history: [(role: String, content: String)] = []
-        for turn in recentHistory {
-            if let role = turn["role"] as? String, let content = turn["content"] as? String {
-                // Strip any tool call markup from history to keep context clean
-                let clean = content
-                    .replacingOccurrences(of: #"<tool_call>.*?</tool_call>"#, with: "", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !clean.isEmpty {
-                    history.append((role: role, content: clean))
-                }
-            }
-        }
+        let history = recentTupleHistory(6, stripToolMarkup: true)
 
         // Add user message to history
         conversationHistory.append(["role": "user", "content": text])
@@ -2242,10 +2277,13 @@ class LLMService: ObservableObject {
         // common no-tool path, which streams cleanly.
         var response: String
         do {
+            // The image rides only the FIRST generation of the turn — tool-result follow-up
+            // regenerations below re-answer over text, which is correct and far cheaper.
             response = try await localService.generate(
                 userMessage: text,
                 systemPrompt: fullPrompt,
                 history: history,
+                imageData: imageData,
                 onToken: onToken
             )
         } catch is CancellationError {
@@ -2345,13 +2383,33 @@ class LLMService: ObservableObject {
         // Uncertainty gate (Plan BI): the local path can't reach `web_search` through a tool
         // loop, so a hedged or freshness-sensitive answer gets one transparent web-grounded
         // re-ask. Off-flag or confident answers pass straight through.
+        //
+        // An intent announcement that survived the corrective regen ("I will now search for…")
+        // is treated as uncertainty too: the promised search actually happens here. And a
+        // promise must NEVER be the spoken answer — if the re-ask can't improve on it (search
+        // failed, flag off), an honest failure line replaces it rather than dead air after
+        // "I'll look that up".
+        let announcedIntent = Self.announcesToolIntent(cleanResponse)
+        // Personal-data questions must never reach the web, even via the announced-intent
+        // branch — "let me check your reminders" + web search = "I don't have access to your
+        // personal reminders", the exact reply the detector's guard exists to prevent.
+        let isPersonalData = UncertaintyDetector.isPersonalDataQuestion(text.lowercased())
         var finalAnswer = cleanResponse
-        if Config.localWebSearchFallbackEnabled,
-           UncertaintyDetector.assess(question: text, answer: cleanResponse).shouldSearch {
+        if Config.localWebSearchFallbackEnabled, !isPersonalData,
+           announcedIntent || UncertaintyDetector.assess(question: text, answer: cleanResponse).shouldSearch {
             finalAnswer = await UncertaintyReask.answer(
                 question: text,
                 originalAnswer: cleanResponse,
+                history: history,
                 search: { query in try await WebSearchTool().execute(args: ["query": query]) },
+                rewriteQuery: { q in
+                    // A follow-up leaning on the conversation ("the other semi final?") is a
+                    // junk literal query — one tiny generation makes it self-contained.
+                    try await localService.generate(
+                        userMessage: "Conversation:\n\(UncertaintyReask.conversationBlock(history: history))\n\nRewrite this follow-up as ONE self-contained web search query. If it already stands alone, output it unchanged. Output only the query, nothing else: \(q)",
+                        systemPrompt: "You rewrite follow-up questions into standalone web search queries. Output only the query."
+                    )
+                },
                 regenerate: { grounding in
                     try await localService.generate(
                         userMessage: grounding,
@@ -2360,6 +2418,12 @@ class LLMService: ObservableObject {
                     )
                 }
             )
+        }
+
+        // The never-speak-a-promise net: if the answer still announces an action (re-ask failed
+        // or the fallback flag is off), replace it with an honest miss.
+        if announcedIntent && finalAnswer == cleanResponse {
+            finalAnswer = "I couldn't get that information just now — please ask me again."
         }
 
         // BK P3: reject an empty local completion (immediate EOS / all-markup) instead of

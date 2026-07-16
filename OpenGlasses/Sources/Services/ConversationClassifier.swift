@@ -153,7 +153,39 @@ struct ConversationClassifier {
             return DirectToolCall(toolName: "get_weather", arguments: [:])
         }
 
+        // Calendar lookups — deterministic action selection (live-traced: the 2B model only
+        // ever called calendar with the default "today", interrogated the user for a date it
+        // couldn't use, then denied having calendar access). Create/add flows still reach the
+        // LLM — they need title/time extraction.
+        if let action = matchCalendarQuery(text) {
+            return DirectToolCall(toolName: "calendar", arguments: ["action": action])
+        }
+
         return nil
+    }
+
+    /// Match an informational calendar question and pick the tool action for it, or nil.
+    /// Three gates: names a calendar-ish noun, is NOT a creation command, and has an
+    /// inspection shape ("do I have…", "what's on…"). Then the day words choose the action.
+    private func matchCalendarQuery(_ text: String) -> String? {
+        let calendarNouns = ["calendar", "schedule", "agenda", "appointments", "meetings", "meeting"]
+        guard calendarNouns.contains(where: text.contains) else { return nil }
+        let createVerbs = ["add", "create", "schedule a", "schedule an", "put ", "book", "set up",
+                           "new event", "move ", "cancel", "delete", "remind"]
+        guard !createVerbs.contains(where: text.contains) else { return nil }
+        let inspectionShapes = ["do i have", "have i got", "anything in", "anything on", "anything for",
+                                "what's in", "whats in", "what's on", "whats on", "what is on",
+                                "what do i have", "check my", "show my", "am i free", "any meetings",
+                                "any events", "any appointments", "next meeting", "next event",
+                                "next appointment", "what's my", "whats my"]
+        guard inspectionShapes.contains(where: text.contains) else { return nil }
+
+        if text.contains("next meeting") || text.contains("next event") || text.contains("next appointment") {
+            return "next"
+        }
+        if text.contains("tomorrow") { return "tomorrow" }
+        if text.contains("week") || text.contains("upcoming") || text.contains("coming up") { return "upcoming" }
+        return "today"
     }
 
     private let weatherDirectPatterns = ["weather forecast", "forecast", "weather"]

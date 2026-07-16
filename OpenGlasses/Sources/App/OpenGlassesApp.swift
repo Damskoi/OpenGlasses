@@ -185,10 +185,7 @@ struct OpenGlassesApp: App {
                         Task { @MainActor in
                             if let persona = Config.enabledPersonas.first(where: { $0.id == personaId }) {
                                 // Activate this persona's model + prompt
-                                appState.activePersona = persona
-                                Config.setActiveModelId(persona.modelId)
-                                Config.setActivePresetId(persona.presetId)
-                                appState.llmService.refreshActiveModel()
+                                appState.applyPersonaRouting(persona)
                                 // Start listening immediately — skip wake word
                                 appState.wakeWordService.stopListening()
                                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1322,11 +1319,8 @@ class AppState: ObservableObject, AppStateProtocol {
                 }
                 // Route to the persona that owns this wake phrase
                 if let persona = Config.persona(forPhrase: matchedPhrase) {
-                    self.activePersona = persona
-                    Config.setActiveModelId(persona.modelId)
-                    Config.setActivePresetId(persona.presetId)
-                    self.llmService.refreshActiveModel()
-                    print("🎭 Persona activated: \(persona.name) (model: \(persona.modelId))")
+                    self.applyPersonaRouting(persona)
+                    print("🎭 Persona activated: \(persona.name) (model: \(persona.modelId.isEmpty ? "user's current" : persona.modelId))")
                 }
                 await self.handleWakeWordDetected()
             }
@@ -1886,7 +1880,6 @@ class AppState: ObservableObject, AppStateProtocol {
             if currentMode == .direct {
                 cameraService.restoreAudioForWakeWord()
             }
-            cameraService.saveToPhotoLibrary(photoData)
             print("📸 Photo + prompt: \(prompt)")
 
             let rawResponse = try await llmService.sendMessage(
@@ -1989,8 +1982,18 @@ class AppState: ObservableObject, AppStateProtocol {
     }
 
     func captureAndAnalyzePhoto() async {
+        if !isConnected {
+            // Recheck before surrendering to the phone camera: the flag can be stale (auto-
+            // sleep fired, a Disconnect tap, a dropped link) while the glasses sit on the
+            // user's face. One bounded reconnect attempt — the same path the hero capsule uses.
+            NSLog("[Photo] Glasses flagged disconnected — rechecking before phone fallback")
+            await glassesService.connect()
+            for _ in 0..<20 where !isConnected {   // up to 5s
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
         guard isConnected else {
-            // No glasses — fall back to the phone camera.
+            // Genuinely no glasses — fall back to the phone camera (explicit UI).
             presentPhoneCamera(prompt: "Describe what you see in this image.", userLog: "[Phone photo]")
             return
         }
@@ -2001,7 +2004,6 @@ class AppState: ObservableObject, AppStateProtocol {
             if currentMode == .direct {
                 cameraService.restoreAudioForWakeWord()
             }
-            cameraService.saveToPhotoLibrary(photoData)
             print("📸 Manual photo captured, sending to LLM for analysis")
 
             let prompt = "Describe what you see in this image."
@@ -2011,7 +2013,12 @@ class AppState: ObservableObject, AppStateProtocol {
                 imageData: photoData,
                 memoryContext: Config.userMemoryEnabled ? userMemory.systemPromptContext(query: Config.userMemoryRetrievalEnabled ? prompt : nil) : nil
             )
-            let response = Config.userMemoryEnabled ? userMemory.parseAndExecuteCommands(in: rawResponse) : rawResponse
+            var response = Config.userMemoryEnabled ? userMemory.parseAndExecuteCommands(in: rawResponse) : rawResponse
+            // A phone-camera capture must SAY so — the phone sees the desk, not what the
+            // glasses are pointed at, and an unannounced camera swap reads as hallucination.
+            if cameraService.lastCaptureSource == .phone {
+                response = "From the phone camera — the glasses weren't available. " + response
+            }
             lastResponse = response
             if Config.conversationPersistenceEnabled {
                 conversationStore.appendMessage(role: "user", content: "[Photo taken manually]")
@@ -2126,7 +2133,6 @@ class AppState: ObservableObject, AppStateProtocol {
             if currentMode == .direct {
                 cameraService.restoreAudioForWakeWord()
             }
-            cameraService.saveToPhotoLibrary(photoData)
             let generator = UINotificationFeedbackGenerator()
             generator.notificationOccurred(.success)
             lastResponse = "Photo saved to camera roll"
@@ -2486,7 +2492,6 @@ class AppState: ObservableObject, AppStateProtocol {
                             try Task.checkCancellation()
                             // Restore audio for wake word after camera capture (camera reconfigures for Bluetooth)
                             self.cameraService.restoreAudioForWakeWord()
-                            self.cameraService.saveToPhotoLibrary(photoData)
                             print("📸 Photo captured, sending to LLM with prompt: \(query)")
 
                             return try await self.llmService.sendMessage(
@@ -2497,7 +2502,12 @@ class AppState: ObservableObject, AppStateProtocol {
                             )
                         },
                         postProcess: { rawResponse in
-                            Config.userMemoryEnabled ? self.userMemory.parseAndExecuteCommands(in: rawResponse) : rawResponse
+                            var response = Config.userMemoryEnabled ? self.userMemory.parseAndExecuteCommands(in: rawResponse) : rawResponse
+                            // Phone-camera captures must announce themselves (see captureAndAnalyzePhoto).
+                            if self.cameraService.lastCaptureSource == .phone {
+                                response = "From the phone camera — the glasses weren't available. " + response
+                            }
+                            return response
                         },
                         accept: { response in
                             self.lastResponse = response
@@ -2687,18 +2697,20 @@ class AppState: ObservableObject, AppStateProtocol {
         // Check for persona names in the transcription (for Action Button / push-to-talk mode)
         // e.g. "Hey Claude, what's the weather" → activate Claude persona, strip prefix.
         // Recognition + stripping is pure (VoiceCommandParser); AppState applies the match.
-        if activePersona == nil {
+        // Runs even with a persona active so "hey travel" can switch away from another persona
+        // mid-session (wake-word mode always could); re-matching the ACTIVE persona's own
+        // phrase just strips the prefix without re-applying routing.
+        do {
             let personas = Config.enabledPersonas
             let personaPhrases = personas.map {
                 VoiceCommandParser.PersonaPhrases(id: $0.id, phrases: $0.allPhrases)
             }
             if let match = voiceCommandParser.detectPersona(in: text, personas: personaPhrases),
                let persona = personas.first(where: { $0.id == match.personaId }) {
-                activePersona = persona
-                Config.setActiveModelId(persona.modelId)
-                Config.setActivePresetId(persona.presetId)
-                llmService.refreshActiveModel()
-                print("🎭 Persona detected in transcription: \(persona.name)")
+                if persona.id != activePersona?.id {
+                    applyPersonaRouting(persona)
+                    print("🎭 Persona detected in transcription: \(persona.name)")
+                }
                 query = match.query
             }
         }
@@ -3072,15 +3084,50 @@ class AppState: ObservableObject, AppStateProtocol {
         let prevPresetId = Config.activePresetId
         let prevPersona = activePersona
 
-        activePersona = persona
-        Config.setActiveModelId(persona.modelId)
-        Config.setActivePresetId(persona.presetId)
+        applyPersonaRouting(persona)
 
         await sendTextMessage(question, speakResponse: false)
 
         Config.setActiveModelId(prevModelId)
         Config.setActivePresetId(prevPresetId)
         activePersona = prevPersona
+        llmService.refreshActiveModel()
+    }
+
+    /// Single owner of the push-to-talk switch (Settings toggle + home-screen BarButton both
+    /// call this): persists the flag and stops/starts the always-on wake-word mic to match.
+    func setPushToTalk(_ enabled: Bool) {
+        Config.setSilentMode(enabled)
+        if enabled {
+            wakeWordService.stopListening()
+            isListening = false
+        } else {
+            Task { try? await wakeWordService.startListening() }
+        }
+    }
+
+    /// Restart the wake-word listener after settings changes that affect it (Direct mode only).
+    func restartWakeWordIfDirect() {
+        guard currentMode == .direct else { return }
+        Task {
+            wakeWordService.stopListening()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await wakeWordService.startListening()
+        }
+    }
+
+    /// Apply a persona's routing: persona + prompt preset, and its model ONLY when it names one.
+    /// All built-in mode templates ship `modelId: ""` meaning "keep the user's current model" —
+    /// setting that blindly hit `activeModelId`'s empty-id fallback and silently reset the
+    /// active model to the FIRST saved model (live-traced: "hey travel" kicked the user off
+    /// their selected local model).
+    func applyPersonaRouting(_ persona: Persona) {
+        activePersona = persona
+        if !persona.modelId.isEmpty {
+            Config.setActiveModelId(persona.modelId)
+        }
+        Config.setActivePresetId(persona.presetId)
+        llmService.refreshActiveModel()
     }
 
     /// Start wake word listener in "stop detection" mode during TTS playback.
@@ -3124,7 +3171,6 @@ class AppState: ObservableObject, AppStateProtocol {
                 guard let self else { throw RemoteInvokeError.unavailable }
                 let data = try await self.cameraService.capturePhoto()
                 self.cameraService.restoreAudioForWakeWord()
-                self.cameraService.saveToPhotoLibrary(data)
             },
             startAudioRecording: { [weak self] in
                 guard let self else { throw RemoteInvokeError.unavailable }

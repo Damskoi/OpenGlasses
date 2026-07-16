@@ -152,21 +152,18 @@ struct LocalModelManagerView: View {
                             if downloadedIds.contains(model.id) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
-                            } else if downloadingModelId == model.id {
-                                HStack(spacing: 8) {
-                                    ProgressView(value: localService?.downloadProgress ?? 0)
-                                        .frame(width: 60)
-                                    // BK P5: a real Cancel — routes through the service so the
-                                    // in-flight download is actually stopped, not just hidden.
-                                    Button("Cancel") {
-                                        localService?.cancelDownload()
-                                        downloadingModelId = nil
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .controlSize(.small)
+                            } else if downloadingModelId == model.id, let service = localService {
+                                // Own subview so the service's @Published progress actually
+                                // re-renders it — read through the computed optional above,
+                                // nothing observed the service and the bar never moved.
+                                DownloadProgressRow(service: service) {
+                                    service.cancelDownload()
+                                    downloadingModelId = nil
                                 }
                             } else if !model.isCompatibleWithDevice {
-                                Label("Needs 8 GB", systemImage: "memorychip")
+                                // The model's OWN requirement — this badge was hardcoded
+                                // "Needs 8 GB" and misreported every other tier.
+                                Label("Needs \(Int(model.minimumRAMGB)) GB", systemImage: "memorychip")
                                     .font(.caption)
                                     .foregroundStyle(.orange)
                             } else {
@@ -188,7 +185,7 @@ struct LocalModelManagerView: View {
             } header: {
                 Text("Recommended")
             } footer: {
-                Text("These models are tested on iPhone and optimized for size. Larger models need more RAM.")
+                Text("These models are tested on iPhone and optimized for size. Larger models need more RAM. Keep the app open while downloading — the screen stays awake automatically.")
             }
 
             // MARK: Custom Model
@@ -333,5 +330,34 @@ struct LocalModelManagerView: View {
         if bytes < 1024 * 1024 { return String(format: "%.0f KB", Double(bytes) / 1024) }
         if bytes < 1024 * 1024 * 1024 { return String(format: "%.1f MB", Double(bytes) / (1024 * 1024)) }
         return String(format: "%.1f GB", Double(bytes) / (1024 * 1024 * 1024))
+    }
+}
+
+/// Observes the service so the download progress actually updates — with a live percentage,
+/// because a multi-GB pull with no numbers reads as a hang. A compact spinner + percent, not a
+/// linear bar: the bar-plus-Cancel cluster was wide enough to crush the model name and its
+/// Vision/Tools badges in the same row.
+private struct DownloadProgressRow: View {
+    @ObservedObject var service: LocalLLMService
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            if service.downloadProgress > 0 {
+                Text("\(Int(service.downloadProgress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            // BK P5: a real Cancel — routes through the service so the in-flight
+            // download is actually stopped, not just hidden.
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Cancel download")
+        }
     }
 }

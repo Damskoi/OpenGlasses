@@ -13,7 +13,7 @@
 1. 构建并安装到你的 iPhone 上（参见[从源码构建](#从源码构建)）
 2. 在 **设置 → AI 模型** 中添加 AI 模型（Anthropic、OpenAI、Gemini 或本地模型）
 3. 通过 Meta AI 应用配对你的 Ray-Ban 或 Oakley Meta 眼镜
-4. 说 **"Hey OpenGlasses"** 然后提问
+4. 说 **"OpenGlasses"** 然后提问
 
 ---
 
