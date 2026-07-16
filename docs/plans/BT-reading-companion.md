@@ -1,6 +1,7 @@
 # Plan BT — Reading Companion
 
-**Status: 📋 Planned (2026-07-16).** A continuous *reading session* vertical: the glasses
+**Status: 🚧 P1 shipped (2026-07-16) — pure session core, 35 headless tests, Release green;
+P2/P3 planned.** A continuous *reading session* vertical: the glasses
 read along with a physical book or e-reader, answer questions grounded in **what the
 reader has actually seen**, and turn each session into retention artifacts (recap, study
 deck) and reading stats. Every primitive already exists in this codebase — OCR (Plan A),
@@ -14,7 +15,33 @@ is *only the pages captured this-and-prior sessions of this book*. Questions are
 from the read-so-far store, never from model world-knowledge about the book (the prompt
 says so explicitly, and the context builder physically cannot include unread text).
 
-## P1 / PR1 — Session core (pure, headless)
+## P1 / PR1 — Session core (pure, headless) — ✅ shipped
+
+**As-built notes:**
+- `PageTurnDetector` reads one `FrameGate` signal two ways rather than adding a second
+  comparison: a **send** is the change (candidate opens, clock restarts), a **drop** is the
+  stillness. One threshold for both halves, so no frame can be neither. It runs its own gate
+  (`hammingThreshold: 3`, no heartbeat, **adaptive off** — the adaptive path widens the drop
+  window in static scenes, and a book on a table is the most static scene there is, so it would
+  have swallowed the page turns). Heartbeat sends are ignored defensively in case a caller
+  injects a gate that has one.
+- `ReadingSessionStore` dedups on **two** signals, not just the planned dHash: the hash catches a
+  re-look whose OCR came out differently, the normalised text catches a re-look from a new angle
+  whose hash therefore drifted. Text matching needs ≥40 chars, else "OCR found nothing" would
+  read as "same page". Hash distance is tight (2 of 64) on purpose — a missed duplicate just
+  repeats a page, a false one silently drops a page the reader did read.
+- `pageIndex` is **book-scoped**, so page numbers run across sessions (Tuesday continues Monday).
+  It's capture order, not the printed page number, which we have no way to know.
+- `ReadingContextBuilder` returns `nil` rather than a rule with no pages under it — a spoiler rule
+  with no evidence invites exactly the world-knowledge answer it's there to prevent. Verbatim
+  pages are capped at ⅔ of the budget so a long current page can't starve the condensed history;
+  the current page always ships, truncated if that's the only way. Dropped pages are declared in
+  the block, never silently omitted.
+- Blank-OCR pages stay in the store (a page really was turned — the pace stats want it) but are
+  skipped by the builder; the resulting gap in numbering is the honest record of the OCR miss.
+- Thresholds are init parameters, not `Config` yet — P1 has no live caller to read `Config` from.
+  P2 wires them; the P3 device pass stays data-only as planned.
+
 
 - `PageTurnDetector` (pure): consumes the existing `FrameGate` signal (`SendReason
   .distinct` keyframes over dHash, `Vision/FrameGate.swift`) plus a stability window — a
