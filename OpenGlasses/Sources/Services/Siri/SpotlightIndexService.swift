@@ -46,6 +46,9 @@ enum SiriContentProvider {
         if config.isEnabled(.studyDeck) {
             records += SiriContentAdapters.studyDecks(StudyStore.shared.decks)
         }
+        if config.isEnabled(.readingSession) {
+            records += SiriContentAdapters.readingSessions(ReadingSessionStore.shared.sessions)
+        }
         if config.isEnabled(.conversation), let appState = AppStateProvider.shared,
            !appState.conversationStore.isLocked {
             let summaries = appState.conversationStore.threads.map {

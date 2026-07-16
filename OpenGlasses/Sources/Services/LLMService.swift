@@ -377,6 +377,14 @@ class LLMService: ObservableObject {
         if let projectContext = ProjectContextService.shared.promptContext() {
             prompt += "\n\n\(projectContext)"
         }
+        // Inject the pages read so far when a reading session is live (Plan BT). Ungated by the
+        // classifier on purpose: mid-book questions ("who is she?") match no keyword list, so the
+        // live session is the signal — same call the playbook context makes. Here rather than as a
+        // threaded parameter because this function is on every path (the lean on-device prompt
+        // included), so local, cloud and cloud-agent all get it from this one line.
+        if let readingContext = ReadingCompanionService.shared.promptContext() {
+            prompt += "\n\n\(readingContext)"
+        }
         // Inject project-scoped notes for the active job (what the user is mid-way through).
         if Config.projectMemoryEnabled,
            let session = FieldSessionService.shared.activeSession, session.isActive {

@@ -1,7 +1,7 @@
 # Plan BT — Reading Companion
 
-**Status: 🚧 P1 shipped (2026-07-16) — pure session core, 35 headless tests, Release green;
-P2/P3 planned.** A continuous *reading session* vertical: the glasses
+**Status: 🚧 P1 + P2 shipped (2026-07-16) — session core, live mode and Q&A wiring, headless
+throughout; device smoke owed. P3 planned.** A continuous *reading session* vertical: the glasses
 read along with a physical book or e-reader, answer questions grounded in **what the
 reader has actually seen**, and turn each session into retention artifacts (recap, study
 deck) and reading stats. Every primitive already exists in this codebase — OCR (Plan A),
@@ -60,7 +60,52 @@ says so explicitly, and the context builder physically cannot include unread tex
 - Tests: detector state machine, store dedup/ordering/stats, context budget + windowing,
   spoiler rule presence.
 
-## P2 / PR2 — Live session mode + Q&A wiring
+## P2 / PR2 — Live session mode + Q&A wiring — ✅ shipped
+
+**As-built notes:**
+- **No `.reading` classifier section — the plan's one wrong call.** A question mid-book is "who is
+  she?" or "why did he do that?", which matches no keyword list, so a keyword-gated section would
+  miss the primary use case. The codebase had already hit this exact wall with playbooks and
+  answered it (`OpenGlassesApp.swift`: *"the classifier never sets `.playbook` (mid-playbook
+  utterances — 'done', 'next' — match no keyword list), and `playbookContext()` already returns nil
+  when no playbook is active"*). The live session is the signal; P1's builder already returns nil
+  with no pages. So `ReadingCompanionService.promptContext()` follows the house
+  `promptContext()` shape and is injected unconditionally in `buildSystemPrompt`, next to the
+  field-assist vault and active-project blocks. Zero classifier changes.
+- **Injected in `buildSystemPrompt`, not threaded as a parameter.** That function is on *every*
+  path (the lean on-device prompt calls it), so one line covers local, cloud and cloud-agent. The
+  threaded-parameter shape the plan implied would have inherited two live gaps where
+  `weatherContext` is silently dropped — `sendMessage`'s on-device branch and `sendViaLocalAgent`'s
+  cloud-agent branch. Those gaps are pre-existing and left alone here; worth a follow-up.
+- **Presence rides `CaptionPresenceGate`, not `LoopThrottle`.** Reading is a continuous
+  user-started stream, and the gate's own doc already describes this reader exactly: *"a user who
+  explicitly turned captions on may be silently reading them (idle by voice, but engaged), so
+  presence must not pause on mere idle."* A motionless, silent reader is `.idle`; only `.away`
+  (disconnected/backgrounded, so no frames anyway) suspends. A tick multiplier would have throttled
+  the reader for reading.
+- **The brain gets the activity, never the prose.** The plan said "session content feeds
+  `BrainStore.ingest`", but the brain is a graph of the reader's *real* life ("who works at Acme",
+  "when did I last see Alice") and `BrainRelationExtractor` is pattern-based with no way to tell a
+  novel's characters from real people — ingesting pages would file Bilbo alongside their
+  colleagues, silently, and surface him answering a real question later. Only
+  `"Read N page(s) of <book>."` is ingested. The pages stay in `ReadingSessionStore`, which is
+  where they belong.
+- **Unreadable captures are counted, not stored** — superseding P1's "blank pages stay in the
+  store" note. A settled view OCR can't read is as likely a wall the reader glanced at as a
+  glare-blown page; filing it inflates their page count and wrecks the pace stats, and it grounds
+  nothing either way. `unreadableCaptures` is the counter to watch on the P3 device pass. The
+  builder still skips blanks defensively.
+- One LLM call yields both artifacts: the deck's `summary.overview` + `keyPoints` *is* the spoken
+  recap. `StudyService.makeDeck` gained an optional `systemPrompt:` so reading can scope the model
+  to the sitting's pages — a model that recognises the book will otherwise quiz the reader on
+  chapters they haven't reached. Recap falls back to a model-free `ReadingRecapBuilder` line when
+  generation fails, so ending a session offline still works.
+- Recap saves through `ContextualNoteStore` (typed API + tags), which the BQ `.note` adapter
+  already indexes — rather than the `saved_notes` key, where a "Reading:" note would have been
+  indexed by nothing (that adapter filters on the meeting-summary title prefix).
+- `where_was_i` works with no live session and needs no model, so picking a book back up answers
+  instantly and offline.
+
 
 - `ReadingCompanionService`: session lifecycle (start/pause/end via voice or UI), frames
   from the existing `CameraService.framePublisher` → detector → OCR (the Plan A
@@ -104,3 +149,15 @@ Headless: detector fixtures, store round-trips, context budget, deck generation 
 fixture pages + full suite + Release green. Device: one 20-minute physical-book session
 (page turns detected, Q&A grounded, recap + deck correct) and one e-reader session
 (glare/contrast), battery + thermal noted.
+
+**As shipped (P1 + P2):** 77 headless tests — detector state machine + fixture sequence
+(page → smear → hand → page), store dedup/ordering/stats/round-trip, context budget +
+windowing + spoiler rule, recap/deck-source/deck-prompt, the full frame → OCR → store
+pipeline through injected seams, tool actions, and the Spotlight adapter. Release green.
+
+**Device smoke still owed, and it is the real gate** — P2 has no verified runtime surface.
+Everything above proves the wiring given *fixture* frames; none of it proves Vision can
+read a curved paperback in lamplight, which the plan itself names as THE risk. Specifically
+unproven until a device runs it: OCR quality on real pages, whether `hammingThreshold: 3`
+and the 1s stability window match real page turns (watch `unreadableCaptures` — a high
+count against a real book means tuning, not a quiet reader), and long-session battery/thermals.
