@@ -3,7 +3,12 @@ import AppIntents
 /// AppIntent for the iPhone Action Button — starts listening for a voice command.
 /// User configures: Settings → Action Button → Shortcut → "Ask OpenGlasses".
 /// Skips wake word detection entirely — just starts transcribing immediately.
-struct AskOpenGlassesIntent: AppIntent {
+// AudioRecordingIntent (iOS 18+): grants BACKGROUND microphone-start rights for intent
+// invocations. Without it, an Action-button press with the app backgrounded is refused by
+// iOS at session activation (CoreAudio '!pla' then CannotInterruptOthers — device-traced:
+// "listening" showed but zero audio was captured, and the Live Activity was denied with
+// "Target is not foreground").
+struct AskOpenGlassesIntent: AppIntent, AudioRecordingIntent {
     static var title: LocalizedStringResource = "Ask OpenGlasses"
     static var description = IntentDescription("Start listening for a voice command without the wake word")
 
@@ -12,7 +17,11 @@ struct AskOpenGlassesIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
+        // Static writer: logs even when AppState is unavailable — distinguishes "iOS never
+        // invoked the intent" from "perform() bailed at the guard".
+        AppState.persistDebugEvent("[intent] AskOpenGlasses perform entered")
         guard let appState = AppStateProvider.shared else {
+            AppState.persistDebugEvent("[intent] AskOpenGlasses: AppState unavailable — appNotRunning")
             throw IntentError.appNotRunning
         }
 
@@ -96,7 +105,12 @@ struct OpenGlassesShortcuts: AppShortcutsProvider {
                 "\(.applicationName) listen"
             ],
             shortTitle: "Ask OpenGlasses",
-            systemImageName: "mic.fill"
+            // The app logo as a custom SF Symbol (Assets: OpenGlassesSymbol.symbolset). The
+            // metadata processor embeds referenced custom symbols so system surfaces (Action
+            // button pane, Shortcuts) can render them. A "?" on those surfaces is iOS's stale
+            // shortcut-metadata cache (dev-reinstall churn) — restart the phone, don't blame
+            // the symbol: the "?" appeared even for plain "mic.fill".
+            systemImageName: "OpenGlassesSymbol"
         )
         AppShortcut(
             intent: TakePhotoIntent(),
