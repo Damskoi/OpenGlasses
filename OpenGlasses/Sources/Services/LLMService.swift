@@ -520,6 +520,12 @@ class LLMService: ObservableObject {
             print("🧭 Agent plan loop yielded no plan — falling back to single-shot")
         }
 
+        // Image hygiene for EVERY provider, not just Anthropic (where the request builder
+        // already prunes): stale images re-upload with every turn, and on the Gemini /
+        // OpenAI-compatible paths an unpruned photo history overflowed the context window
+        // outright. Prune here so all providers start the turn with at most one prior image.
+        conversationHistory = HistoryHygiene.pruneImages(conversationHistory, keepLast: 1)
+
         let rawResponse: String
         switch provider {
         case .anthropic:
@@ -1473,6 +1479,12 @@ class LLMService: ObservableObject {
         return nil
     }
 
+    /// A `.custom` endpoint that 400'd on a `tools` payload (some Ollama/LM Studio builds).
+    /// Remembered for the session so later turns skip tools instead of re-tripping the 400.
+    /// `static nonisolated(unsafe)` because it's flipped inside the nonisolated per-turn
+    /// closure; a bool flag with one realistic writer needs no stronger isolation.
+    nonisolated(unsafe) private static var customEndpointRejectsTools = false
+
     private func sendOpenAICompatible(_ text: String, systemPrompt: String, config: ModelConfig, includeTools: Bool, imageData: Data?, onToken: ((String) -> Void)? = nil, onStreamReset: (() -> Void)? = nil) async throws -> String {
         let provider = config.llmProvider
         let apiKey = config.apiKey
@@ -1564,8 +1576,11 @@ class LLMService: ObservableObject {
                 ]
 
                 // Only attach Tools if the provider reliably supports function calling.
-                // Custom endpoints (Ollama/LMStudio) often crash with 400 if `tools` array is in the payload.
+                // Custom endpoints get tools too (Gemini/vLLM/newer Ollama all speak OpenAI
+                // function calling); the ones that 400 on a `tools` payload are retried once
+                // without tools below and remembered for the rest of the session.
                 let providerSupportsTools = provider == .openai || provider == .groq || provider == .zai || provider == .qwen || provider == .openrouter
+                    || (provider == .custom && !Self.customEndpointRejectsTools)
 
                 if includeTools && providerSupportsTools {
                     let includeOpenClaw = Config.isOpenClawAgentActive && self.openClawBridge != nil
@@ -1595,19 +1610,42 @@ class LLMService: ObservableObject {
                 // Final-reply turns stream into the Chat tab when a streaming caller passes `onToken`;
                 // the reconstructed `message` (content + tool_calls) feeds the shared tool loop unchanged.
                 let message: [String: Any]
+                // Retry-without-tools for `.custom` (some Ollama/LM Studio builds 400 on the
+                // `tools` array): strip it, remember for the session, and re-send once.
+                func retryRequestWithoutTools() throws -> URLRequest {
+                    NSLog("[LLMService] custom endpoint rejected tools payload — retrying without tools")
+                    Self.customEndpointRejectsTools = true
+                    body.removeValue(forKey: "tools")
+                    var retried = request
+                    retried.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    return retried
+                }
+                let toolsAttached = body["tools"] != nil
+
                 if let onToken {
                     // New tool-loop iteration: clear the caller's accumulated bubble first, so an
                     // intermediate tool turn's text never concatenates with the final reply (BM P9).
                     onStreamReset?()
                     let flag = TokenDeliveryFlag()
-                    message = try await self.withTransientSSERetries(tokenFlag: flag) {
-                        try await self.streamOpenAIMessage(request: request, provider: provider, model: config.model) { token in
-                            flag.mark()
-                            onToken(token)
+                    func streamTurn(_ req: URLRequest) async throws -> [String: Any] {
+                        try await self.withTransientSSERetries(tokenFlag: flag) {
+                            try await self.streamOpenAIMessage(request: req, provider: provider, model: config.model) { token in
+                                flag.mark()
+                                onToken(token)
+                            }
                         }
                     }
+                    do {
+                        message = try await streamTurn(request)
+                    } catch LLMError.apiError(_, 400, _) where provider == .custom && toolsAttached {
+                        message = try await streamTurn(try retryRequestWithoutTools())
+                    }
                 } else {
-                    let (data, response) = try await URLSession.shared.data(for: request)
+                    var (data, response) = try await URLSession.shared.data(for: request)
+                    if provider == .custom, toolsAttached,
+                       (response as? HTTPURLResponse)?.statusCode == 400 {
+                        (data, response) = try await URLSession.shared.data(for: try retryRequestWithoutTools())
+                    }
 
                     guard let httpResponse = response as? HTTPURLResponse,
                           httpResponse.statusCode == 200 else {
@@ -1639,17 +1677,30 @@ class LLMService: ObservableObject {
 
                 var toolCalls: [ToolInvocation] = []
                 if includeTools, let calls = message["tool_calls"] as? [[String: Any]] {
-                    for toolCall in calls {
-                        guard let callId = toolCall["id"] as? String,
-                              let function = toolCall["function"] as? [String: Any],
-                              let functionName = function["name"] as? String,
-                              let argsString = function["arguments"] as? String else { continue }
+                    for (index, toolCall) in calls.enumerated() {
+                        // Only `function.name` is truly required. Gemini's OpenAI-compatible
+                        // endpoint can omit `id` and `arguments` (no-arg tools) — the old strict
+                        // guard silently DROPPED such calls, so the loop finalized with an empty
+                        // reply while the server had returned a perfectly good tool_call.
+                        guard let function = toolCall["function"] as? [String: Any],
+                              let functionName = function["name"] as? String else {
+                            NSLog("[LLMService] Dropping malformed tool_call (no function.name): %@",
+                                  String(String(describing: toolCall).prefix(200)))
+                            continue
+                        }
+                        let callId = (toolCall["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "call_\(index)"
+                        let argsString = function["arguments"] as? String ?? "{}"
                         // Malformed tool arguments (Plan BF): nil `arguments` → the dispatcher returns a
                         // correctable parse error instead of running the tool with empty args.
                         let parsedArgs = try? JSONSerialization.jsonObject(with: Data(argsString.utf8)) as? [String: Any]
                         toolCalls.append(ToolInvocation(id: callId, name: functionName,
                                                         arguments: parsedArgs, rawArguments: argsString))
                     }
+                    // One log line per turn: what was parsed vs what the server sent — the seam
+                    // where a "tool_call returned but nothing executed" bug is diagnosed.
+                    NSLog("[LLMService] %@ turn: %d/%d tool call(s) parsed%@", provider.displayName,
+                          toolCalls.count, calls.count,
+                          toolCalls.isEmpty ? "" : " → " + toolCalls.map(\.name).joined(separator: ", "))
                 }
                 let text = message["content"] as? String ?? ""
                 return AssistantTurn(text: text, toolCalls: toolCalls, payload: message)
@@ -1678,10 +1729,11 @@ class LLMService: ObservableObject {
             },
             finalize: { [weak self] turn in
                 guard let self else { throw LLMError.invalidResponse(provider.displayName) }
-                guard let message = turn.payload as? [String: Any],
-                      let responseText = message["content"] as? String else {
-                    throw LLMError.invalidResponse(provider.displayName)
-                }
+                // Gemini's OpenAI-compatible endpoint omits `content` on tool-call turns — a
+                // hard guard here 400-equivalent-failed the whole conversation after a
+                // successful tool run. Fall back to the accumulated turn text (may be empty).
+                let message = turn.payload as? [String: Any]
+                let responseText = (message?["content"] as? String) ?? turn.text
                 self.conversationHistory.append(["role": "assistant", "content": responseText])
                 return responseText
             }

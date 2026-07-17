@@ -4,8 +4,8 @@ import UIKit
 /// base64-encoded into a request.
 ///
 /// Anthropic's Messages API rejects an inline image larger than **5 MB** with a 400
-/// (`image exceeds 5 MB maximum`) and downsamples anything over ~1568 px on the long edge
-/// anyway. Ray-Ban glasses frames arrive small (the DAT stream is already downscaled), so
+/// (`image exceeds 5 MB maximum`) and downsamples anything over the model's long-edge
+/// ceiling anyway. Ray-Ban glasses frames arrive small (the DAT stream is already downscaled), so
 /// this never bites on the glasses path — but the iPhone-camera fallback
 /// (`PhoneCameraSource`) and the photo tools capture at full sensor resolution, where a
 /// 12 MP JPEG can clear 5 MB and fail the request on *exactly* the no-glasses path we rely
@@ -15,8 +15,13 @@ import UIKit
 /// (Lesson cribbed from the `glassbridge` project's LEARNINGS.md, which hit this 400 with
 /// native iPhone JPEGs.)
 enum LLMImagePreparer {
-    /// Longest edge (in pixels) we allow before downscaling — Anthropic's recommended ceiling.
-    static let maxLongEdge: CGFloat = 1568
+    /// Longest edge (in pixels) we allow before downscaling. Current Claude models
+    /// (Sonnet 5 / Opus 4.7+, incl. our default) support high-resolution vision up to
+    /// 2576 px on the long edge; older models just downscale server-side, so this is safe
+    /// across providers. Costs more image tokens than the old 1568 ceiling, but history
+    /// pruning keeps only the latest image so the spend is bounded — and the extra fidelity
+    /// is exactly what instrument_reading / text-in-scene captures need.
+    static let maxLongEdge: CGFloat = 2576
     /// Byte ceiling for the encoded JPEG, kept comfortably under Anthropic's 5 MB hard limit.
     static let maxBytes = 4_500_000
     /// Frames below this long edge carry no usable content (the 1×1 placeholder failure mode).

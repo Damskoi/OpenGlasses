@@ -212,6 +212,23 @@ class OpenClawBridge: ObservableObject {
         disconnectWebSocket()
     }
 
+    /// Consecutive WebSocket failures since the last successful connect. The resolved endpoint
+    /// is cached forever on success, so a candidate that later dies (left the LAN, tunnel
+    /// restarted) would otherwise be hammered until app restart — "persistent gateway offline".
+    /// After a few failures in a row, drop the cache so the next attempt re-probes all
+    /// candidates (LAN → tunnel failover).
+    private var consecutiveWSFailures = 0
+    private static let maxWSFailuresBeforeEndpointReset = 3
+
+    private func noteWSFailure() {
+        consecutiveWSFailures += 1
+        guard consecutiveWSFailures >= Self.maxWSFailuresBeforeEndpointReset else { return }
+        NSLog("[OpenClaw] %d consecutive WS failures — dropping cached endpoint to re-probe", consecutiveWSFailures)
+        consecutiveWSFailures = 0
+        cachedEndpoint = nil
+        resolvedConnection = nil
+    }
+
     /// The active gateway's token, or the legacy token.
     var activeToken: String {
         activeGateway?.token ?? Config.openClawGatewayToken
@@ -372,6 +389,7 @@ class OpenClawBridge: ObservableObject {
            let ok = json["ok"] as? Bool, ok {
             wsConnected = true
             sessionCompacted = false
+            consecutiveWSFailures = 0
             NSLog("[OpenClaw] WS connected as node with capabilities")
             startReceiveLoop()
 
@@ -380,6 +398,7 @@ class OpenClawBridge: ObservableObject {
             onGatewayConnected?()
         } else {
             NSLog("[OpenClaw] WS connect failed: %@", String(response.prefix(300)))
+            noteWSFailure()
             throw NSError(domain: "OpenClaw", code: -2, userInfo: [NSLocalizedDescriptionKey: "WebSocket auth failed: \(String(response.prefix(200)))"])
         }
     }

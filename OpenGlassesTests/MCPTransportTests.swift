@@ -105,6 +105,60 @@ final class MCPTransportTests: XCTestCase {
         }
     }
 
+    // MARK: - MCP session handshake + SSE framing (Streamable HTTP)
+
+    func testFirstRequestPerformsInitializeHandshake() async throws {
+        MockURLProtocol.reset()
+        MockURLProtocol.responseBody = Data(#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#.utf8)
+
+        let server = MCPServerConfig(id: "hs", label: "FastMCP", url: "https://example.test/mcp",
+                                     headers: [:], enabled: true)
+        let transport = HTTPTransport(session: MockURLProtocol.session())
+        _ = try await transport.request(["jsonrpc": "2.0", "id": 1, "method": "tools/list"], server: server)
+
+        // initialize + notifications/initialized + the real payload.
+        XCTAssertEqual(MockURLProtocol.requestCount, 3)
+        // Streamable HTTP requires accepting both response framings on every request.
+        let captured = try XCTUnwrap(MockURLProtocol.lastRequest)
+        XCTAssertEqual(captured.value(forHTTPHeaderField: "Accept"), "application/json, text/event-stream")
+
+        // Second request on the same server reuses the session — no re-handshake.
+        _ = try await transport.request(["jsonrpc": "2.0", "id": 2, "method": "tools/list"], server: server)
+        XCTAssertEqual(MockURLProtocol.requestCount, 4)
+    }
+
+    func testSessionIDFromInitializeIsSentOnSubsequentRequests() async throws {
+        MockURLProtocol.reset()
+        MockURLProtocol.responseBody = Data(#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#.utf8)
+        MockURLProtocol.responseHeaders = ["mcp-session-id": "sess-123"]
+
+        let server = MCPServerConfig(id: "sid", label: "Sessioned", url: "https://example.test/mcp",
+                                     headers: [:], enabled: true)
+        let transport = HTTPTransport(session: MockURLProtocol.session())
+        _ = try await transport.request(["jsonrpc": "2.0", "id": 1, "method": "tools/list"], server: server)
+
+        let captured = try XCTUnwrap(MockURLProtocol.lastRequest)
+        XCTAssertEqual(captured.value(forHTTPHeaderField: "mcp-session-id"), "sess-123",
+                       "the session minted at initialize rides every later request")
+    }
+
+    func testSSEFramedResponseIsUnwrappedToJSON() async throws {
+        MockURLProtocol.reset()
+        // FastMCP frames POST responses as SSE even for a single JSON-RPC reply.
+        MockURLProtocol.responseHeaders = ["Content-Type": "text/event-stream"]
+        MockURLProtocol.responseBody = Data(
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[]}}\n\n".utf8)
+
+        let server = MCPServerConfig(id: "sse-framed", label: "FastMCP", url: "https://example.test/mcp",
+                                     headers: [:], enabled: true)
+        let transport = HTTPTransport(session: MockURLProtocol.session())
+        let data = try await transport.request(["jsonrpc": "2.0", "id": 7, "method": "tools/list"], server: server)
+
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["id"] as? Int, 7, "caller receives the unwrapped JSON-RPC payload, not SSE framing")
+        XCTAssertNotNil((json["result"] as? [String: Any])?["tools"])
+    }
+
     func testHTTPTransportThrowsOnHTTPError() async {
         MockURLProtocol.reset()
         MockURLProtocol.statusCode = 503
@@ -135,12 +189,17 @@ final class MockURLProtocol: URLProtocol {
     nonisolated(unsafe) static var lastBody: Data?
     nonisolated(unsafe) static var responseBody = Data("{}".utf8)
     nonisolated(unsafe) static var statusCode = 200
+    nonisolated(unsafe) static var responseHeaders: [String: String] = [:]
+    nonisolated(unsafe) static var requestCount = 0
 
     static func reset() {
         lastRequest = nil
         lastBody = nil
         responseBody = Data("{}".utf8)
         statusCode = 200
+        responseHeaders = [:]
+        requestCount = 0
+        HTTPTransport.resetSessions()   // the session cache is static — isolate tests
     }
 
     static func session() -> URLSession {
@@ -155,10 +214,13 @@ final class MockURLProtocol: URLProtocol {
     override func startLoading() {
         MockURLProtocol.lastRequest = request
         MockURLProtocol.lastBody = Self.readBody(from: request)
+        MockURLProtocol.requestCount += 1
 
+        var headers = ["Content-Type": "application/json"]
+        headers.merge(MockURLProtocol.responseHeaders) { _, new in new }
         let response = HTTPURLResponse(
             url: request.url!, statusCode: MockURLProtocol.statusCode,
-            httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: MockURLProtocol.responseBody)
         client?.urlProtocolDidFinishLoading(self)

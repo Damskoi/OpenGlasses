@@ -74,20 +74,112 @@ enum MCPTransportError: LocalizedError, Equatable {
     }
 }
 
-/// The shipped transport: one JSON-RPC request over an HTTP POST (Streamable HTTP). This is a
-/// byte-for-byte lift of the original inline `MCPClient.mcpRequest` — same method, headers, 15s
-/// timeout, and ≥400 → throw — so extracting it is a pure refactor with no behaviour change. The
-/// `session` is injectable purely so tests can stub `URLProtocol`; production uses `.shared`.
+/// The shipped transport: Streamable HTTP (JSON-RPC over HTTP POST) with the MCP session
+/// lifecycle. On first contact with a server it performs the MCP handshake (`initialize` →
+/// `notifications/initialized`) and captures the `mcp-session-id` header; subsequent requests
+/// carry that header. Responses may arrive as plain JSON (`application/json`) or SSE-framed
+/// (`text/event-stream` — FastMCP and the official TS server always frame POST responses this
+/// way), so the JSON-RPC payload is unwrapped via `SSEEventParser` before it's returned; callers
+/// always receive raw JSON `Data`. Servers that implement neither (bare single-POST endpoints,
+/// e.g. Home Assistant's) still work: a failed handshake marks the server "no session" and the
+/// request proceeds exactly as before.
+///
+/// The `session` is injectable purely so tests can stub `URLProtocol`; production uses `.shared`.
 struct HTTPTransport: MCPTransport {
     var session: URLSession = .shared
 
+    /// Per-server MCP session IDs, `static` so they survive across the per-request instances that
+    /// `MCPTransportFactory` creates. Thread-safe in practice because every caller goes through
+    /// the `@MainActor` `MCPClient`. Empty string means "initialized, server doesn't use
+    /// sessions"; absent key means "not yet initialized".
+    nonisolated(unsafe) private static var sessions: [String: String] = [:]
+
+    /// Clear cached sessions (test support, and `MCPClient` calls it when a server's config
+    /// changes so a rotated token re-handshakes).
+    static func resetSessions() { sessions.removeAll() }
+
     func request(_ payload: [String: Any], server: MCPServerConfig) async throws -> Data {
-        guard let url = URL(string: server.url) else {
+        // First contact with this server: run the MCP initialize handshake.
+        if Self.sessions[server.id] == nil {
+            await initializeSession(server: server)
+        }
+
+        let sessionID = Self.sessions[server.id]
+        let (data, response) = try await sendHTTP(payload, server: server, sessionID: sessionID)
+        guard let httpResponse = response as? HTTPURLResponse else { return data }
+
+        // 400/406 while we hold no real session → the server requires the MCP session
+        // lifecycle (a previous handshake failed or expired). Re-initialize and retry once.
+        if (httpResponse.statusCode == 400 || httpResponse.statusCode == 406), (sessionID ?? "").isEmpty {
+            Self.sessions.removeValue(forKey: server.id)
+            await initializeSession(server: server)
+            let (retryData, retryResponse) = try await sendHTTP(payload, server: server,
+                                                                sessionID: Self.sessions[server.id])
+            if let retryHTTP = retryResponse as? HTTPURLResponse, retryHTTP.statusCode >= 400 {
+                let body = String(data: retryData, encoding: .utf8) ?? ""
+                throw MCPTransportError.http(status: retryHTTP.statusCode, body: String(body.prefix(200)))
+            }
+            return extractJSON(from: retryData, response: retryResponse, payload: payload)
+        }
+
+        if httpResponse.statusCode >= 400 {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw MCPTransportError.http(status: httpResponse.statusCode, body: String(body.prefix(200)))
+        }
+
+        // Capture a session ID from any successful response (a server may mint one late).
+        if let newSessionID = httpResponse.value(forHTTPHeaderField: "mcp-session-id") {
+            Self.sessions[server.id] = newSessionID
+        }
+
+        return extractJSON(from: data, response: response, payload: payload)
+    }
+
+    // MARK: - MCP session handshake
+
+    /// `initialize` → `notifications/initialized`. On failure the server is marked "no session
+    /// needed" so the real request still goes through — simple MCP servers skip the lifecycle.
+    private func initializeSession(server: MCPServerConfig) async {
+        let initPayload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [:] as [String: Any],
+                "clientInfo": ["name": "OpenGlasses", "version": "1.0"] as [String: Any],
+            ] as [String: Any],
+        ]
+        do {
+            let (_, response) = try await sendHTTP(initPayload, server: server, sessionID: nil)
+            let sessionID = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "mcp-session-id") ?? ""
+            Self.sessions[server.id] = sessionID   // "" = server doesn't use sessions
+
+            // Fire-and-forget; a server that returned a session expects this before real calls.
+            let notifPayload: [String: Any] = ["jsonrpc": "2.0", "method": "notifications/initialized"]
+            _ = try? await sendHTTP(notifPayload, server: server,
+                                    sessionID: sessionID.isEmpty ? nil : sessionID)
+        } catch {
+            Self.sessions[server.id] = ""
+            print("⚠️ MCP: session init failed for \(server.label), proceeding without session: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - HTTP
+
+    private func sendHTTP(_ payload: [String: Any], server: MCPServerConfig,
+                          sessionID: String?) async throws -> (Data, URLResponse) {
+        guard !server.url.isEmpty, let url = URL(string: server.url) else {
             throw MCPTransportError.badURL
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // MCP Streamable HTTP requires the client to accept both response framings.
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        if let sessionID, !sessionID.isEmpty {
+            request.setValue(sessionID, forHTTPHeaderField: "mcp-session-id")
+        }
 
         // Auth headers (e.g. Authorization: Bearer …) are applied identically for every transport.
         for (key, value) in server.headers {
@@ -96,11 +188,25 @@ struct HTTPTransport: MCPTransport {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 15
+        return try await session.data(for: request)
+    }
 
-        let (data, response) = try await session.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw MCPTransportError.http(status: httpResponse.statusCode, body: String(body.prefix(200)))
+    // MARK: - SSE response unwrapping
+
+    /// If the server answered in `text/event-stream` framing, pull the JSON-RPC response out of
+    /// the SSE events — matched to the request's `id` where possible (a stream can interleave
+    /// notifications before the response), else the first event. Plain JSON passes through.
+    private func extractJSON(from data: Data, response: URLResponse, payload: [String: Any]) -> Data {
+        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
+        guard contentType.contains("text/event-stream"),
+              let body = String(data: data, encoding: .utf8) else { return data }
+        let events = SSEEventParser.parse(body)
+        if let rpcID = payload["id"] as? Int,
+           let matched = SSEEventParser.jsonRPCResponse(in: events, id: rpcID) {
+            return matched
+        }
+        if let first = events.first, let jsonData = first.data.data(using: .utf8) {
+            return jsonData
         }
         return data
     }

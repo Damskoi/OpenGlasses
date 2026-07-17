@@ -3,7 +3,7 @@ import UIKit
 @testable import OpenGlasses
 
 /// Verifies the outgoing-image guard that keeps cloud vision requests under Anthropic's
-/// 5 MB inline-image cap (and ~1568 px long-edge ceiling). This matters specifically on
+/// 5 MB inline-image cap (and the high-res 2576 px long-edge ceiling). This matters specifically on
 /// the iPhone-camera fallback / photo-tool paths, which capture at full sensor resolution
 /// — the one place a 12 MP JPEG can blow past 5 MB and 400 the request.
 final class LLMImagePreparerTests: XCTestCase {
@@ -33,7 +33,7 @@ final class LLMImagePreparerTests: XCTestCase {
         let out = LLMImagePreparer.prepared(input)
         XCTAssertLessThanOrEqual(longEdge(of: out), Int(LLMImagePreparer.maxLongEdge))
         XCTAssertLessThanOrEqual(out.count, LLMImagePreparer.maxBytes)
-        // Aspect ratio preserved (3:2 → long edge 1568, short edge ~1045).
+        // Aspect ratio preserved (3:2 → long edge 2576, short edge ~1717).
         if let cg = UIImage(data: out)?.cgImage {
             XCTAssertEqual(Double(cg.width) / Double(cg.height), 3.0 / 2.0, accuracy: 0.02)
         }
