@@ -10,18 +10,25 @@ final class ReadingAccessibilityTool: NativeTool {
     let name = "reading_assist"
     let description = """
     Help the user read text in front of them through the glasses camera. Modes: 'read' (clean OCR \
-    artifacts and read aloud), 'simplify' (rewrite at a reading level), 'translate' (into a target \
+    artifacts and read aloud), 'ask' (answer a specific question about the visible text — e.g. \
+    "what's the total?", "when does this expire?", "what's the phone number?" — grounded ONLY in \
+    the captured text), 'simplify' (rewrite at a reading level), 'translate' (into a target \
     language), 'define' (plain-language definition of a term). Use when the user says things like \
-    'read this to me', 'simplify this', 'translate this sign', or 'what does this word mean'. \
-    Params: mode (required), reading_level (1–5, optional), target_language (e.g. 'es', optional), \
-    term (optional, for 'define' when the word was spoken rather than captured).
+    'read this to me', 'what does the receipt say the total is', 'simplify this', 'translate this \
+    sign', or 'what does this word mean'. Params: mode (required), question (for 'ask'), \
+    reading_level (1–5, optional), target_language (e.g. 'es', optional), term (optional, for \
+    'define' when the word was spoken rather than captured).
     """
     let parametersSchema: [String: Any] = [
         "type": "object",
         "properties": [
             "mode": [
                 "type": "string",
-                "description": "'read', 'simplify', 'translate', or 'define'."
+                "description": "'read', 'ask', 'simplify', 'translate', or 'define'."
+            ],
+            "question": [
+                "type": "string",
+                "description": "For 'ask': the user's question about the visible text, verbatim."
             ],
             "reading_level": [
                 "type": "integer",
@@ -64,21 +71,35 @@ final class ReadingAccessibilityTool: NativeTool {
             return "\(directive)\n\nTERM:\n\(term)"
         }
 
-        let text = await captureAndRecognize()
+        let (text, capturedImage) = await captureAndRecognize()
         guard let text, !text.isEmpty else {
-            return "I couldn't read any text. Try holding steady, moving closer, or improving the lighting."
+            // Abstain with guidance tailored by a cheap sharpness check: a blurry frame needs a
+            // steadier hold; a sharp frame with no text needs a better position. Never invent.
+            if let capturedImage, ImageSharpness.isBlurry(capturedImage) {
+                return "I couldn't read any text — it looks a bit blurry. Ask the user to hold steady for a moment and try again."
+            }
+            return "I couldn't read any text. Ask the user to move a little closer, adjust the angle, or improve the lighting, then try again."
+        }
+
+        if mode == .ask {
+            let question = (args["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let questionBlock = question.isEmpty ? "" : "\n\nQUESTION:\n\(question)"
+            return "\(directive)\n\nCAPTURED TEXT:\n\(text)\(questionBlock)"
         }
         return "\(directive)\n\nCAPTURED TEXT:\n\(text)"
     }
 
-    /// Capture the current frame (or take a photo) and OCR it on-device.
-    private func captureAndRecognize() async -> String? {
+    /// Capture the current frame (or take a photo) and OCR it on-device. Also returns the raw
+    /// image that was tried last, so the caller can tailor guidance when no text was found.
+    private func captureAndRecognize() async -> (text: String?, imageData: Data?) {
+        var lastImage: Data?
         if let frame = cameraService.latestFrame, let data = frame.jpegData(compressionQuality: 0.9) {
+            lastImage = data
             let result = await ocr.recognizeText(in: data)
-            if !result.isEmpty { return result.text }
+            if !result.isEmpty { return (result.text, data) }
         }
-        guard let data = try? await cameraService.capturePhoto() else { return nil }
+        guard let data = try? await cameraService.capturePhoto() else { return (nil, lastImage) }
         let result = await ocr.recognizeText(in: data)
-        return result.isEmpty ? nil : result.text
+        return (result.isEmpty ? nil : result.text, data)
     }
 }

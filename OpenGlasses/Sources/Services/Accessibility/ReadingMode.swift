@@ -10,6 +10,7 @@ enum ReadingMode: String, CaseIterable {
     case simplify
     case translate
     case define
+    case ask
 
     init?(rawValue: String) {
         switch rawValue.lowercased() {
@@ -17,6 +18,7 @@ enum ReadingMode: String, CaseIterable {
         case "simplify": self = .simplify
         case "translate": self = .translate
         case "define": self = .define
+        case "ask", "answer", "question": self = .ask
         default: return nil
         }
     }
@@ -45,6 +47,17 @@ enum ReadingMode: String, CaseIterable {
             return """
             READING MODE — TRANSLATE. Translate the following text into \(name). Preserve tone and \
             meaning. Output only the translated text. No markdown, no commentary.
+            """
+        case .ask:
+            // Grounding + abstention: a low-vision user can't verify the answer, so a confident
+            // invention is worse than "I can't find it".
+            return """
+            READING MODE — ANSWER FROM CAPTURED TEXT. The user asked a question about text their \
+            glasses camera captured (below). They may not be able to verify what you say, so answer \
+            using ONLY the captured text: give the direct answer first, then one brief supporting \
+            detail if it is present. If the answer is not in the captured text, say you can't find \
+            it and suggest repositioning the glasses — do NOT guess or add anything that isn't \
+            there. Reply in one or two natural spoken sentences. No markdown, no commentary.
             """
         case .define:
             return """
