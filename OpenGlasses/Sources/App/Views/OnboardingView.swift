@@ -29,6 +29,15 @@ struct OnboardingView: View {
     @State private var availableModels: [ModelFetcher.RemoteModel] = []
     @State private var selectedModelId: String?
 
+    // Sign in with Claude (OAuth) — the no-API-key path for the Anthropic provider. Same
+    // service the model editor uses; a connected account means requests authenticate with
+    // the user's Claude subscription (`AnthropicAuth.resolveCredential` falls back to it
+    // whenever the saved model's key is empty).
+    @ObservedObject private var claudeOAuth = ClaudeOAuthService.shared
+    @State private var showOAuthCodeField = false
+    @State private var oauthCode = ""
+    @State private var isExchangingOAuthCode = false
+
     // Optional service keys
     @State private var elevenLabsKey = ""
     @State private var perplexityKey = ""
@@ -242,11 +251,13 @@ struct OnboardingView: View {
 
         return VStack(spacing: 0) {
             VStack(spacing: 8) {
-                Text(needsKey ? "Add your access key" : "You're all set")
+                Text(needsKey ? (provider == .anthropic ? "Connect Claude" : "Add your access key") : "You're all set")
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.white)
                 if needsKey {
-                    Text("Paste your \(provider.displayName) access key below")
+                    Text(provider == .anthropic
+                         ? "Sign in with your Claude account, or paste an API key"
+                         : "Paste your \(provider.displayName) access key below")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.6))
                 }
@@ -258,6 +269,12 @@ struct OnboardingView: View {
 
             if needsKey {
                 VStack(spacing: 16) {
+                    // Sign in with Claude — the subscription path; hides the key field once connected.
+                    if provider == .anthropic {
+                        claudeSignInSection
+                    }
+
+                    if !(provider == .anthropic && claudeOAuth.isConnected) {
                     // Access Key input
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Access Key")
@@ -325,6 +342,7 @@ struct OnboardingView: View {
                         }
                         .padding(.horizontal, 28)
                     }
+                    }   // end key-input block (hidden when a Claude account is connected)
 
                     // Model picker (shown after successful validation)
                     if keyValid && !availableModels.isEmpty {
@@ -370,16 +388,18 @@ struct OnboardingView: View {
                     }
 
                     // Link to get a key
-                    Button {
-                        openAPIKeyURL(for: provider)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.up.right.square")
-                                .font(.caption)
-                            Text(apiKeyURLLabel(for: provider))
-                                .font(.subheadline)
+                    if !(provider == .anthropic && claudeOAuth.isConnected) {
+                        Button {
+                            openAPIKeyURL(for: provider)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.caption)
+                                Text(apiKeyURLLabel(for: provider))
+                                    .font(.subheadline)
+                            }
+                            .foregroundStyle(.white.opacity(0.7))
                         }
-                        .foregroundStyle(.white.opacity(0.7))
                     }
                 }
             } else {
@@ -398,7 +418,7 @@ struct OnboardingView: View {
             Spacer()
 
             if needsKey {
-                if keyValid {
+                if keyValid || (provider == .anthropic && claudeOAuth.isConnected) {
                     primaryButton("Continue") {
                         saveModel()
                         withAnimation { page = 3 }
@@ -429,6 +449,129 @@ struct OnboardingView: View {
                 }
                 .padding(.bottom, 20)
             }
+        }
+    }
+
+    // MARK: - Sign in with Claude (OAuth)
+
+    /// The onboarding variant of the model editor's Claude sign-in rows, styled for the dark
+    /// full-screen flow. Connected → a confirmation card (the key field is hidden); not
+    /// connected → a sign-in button that opens the browser, then a paste-the-code field.
+    @ViewBuilder
+    private var claudeSignInSection: some View {
+        if claudeOAuth.isConnected {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Claude account connected")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white)
+                    Text("Requests use your Claude subscription — no API key needed.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                Spacer()
+                Button("Sign out") {
+                    claudeOAuth.signOut()
+                    keyValid = false
+                    availableModels = []
+                    selectedModelId = nil
+                }
+                .font(.caption)
+                .foregroundStyle(.red.opacity(0.8))
+            }
+            .padding(14)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.green.opacity(0.4), lineWidth: 1)
+            )
+            .padding(.horizontal, 28)
+        } else {
+            VStack(spacing: 10) {
+                Button {
+                    if let url = claudeOAuth.beginSignIn() {
+                        UIApplication.shared.open(url)
+                        showOAuthCodeField = true
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.crop.circle.badge.checkmark")
+                        Text("Sign in with Claude")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                }
+
+                Text("Use your Claude subscription — no API key required.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.5))
+
+                if showOAuthCodeField {
+                    TextField("Paste authorization code", text: $oauthCode)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+
+                    Button {
+                        Task {
+                            isExchangingOAuthCode = true
+                            let ok = await claudeOAuth.completeSignIn(pastedCode: oauthCode)
+                            isExchangingOAuthCode = false
+                            if ok {
+                                oauthCode = ""
+                                showOAuthCodeField = false
+                                validateViaClaudeAccount()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isExchangingOAuthCode {
+                                ProgressView().scaleEffect(0.8)
+                                Text("Connecting…")
+                            } else {
+                                Image(systemName: "link")
+                                Text("Connect")
+                            }
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .disabled(oauthCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isExchangingOAuthCode)
+
+                    Text("Sign in in the browser, copy the code from the callback page, then paste it here.")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.4))
+                        .multilineTextAlignment(.center)
+                }
+
+                if let error = claudeOAuth.lastError {
+                    Label(error, systemImage: "xmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.red.opacity(0.8))
+                }
+
+                HStack(spacing: 12) {
+                    Rectangle().fill(Color.white.opacity(0.15)).frame(height: 1)
+                    Text("or paste an API key")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.4))
+                        .fixedSize()
+                    Rectangle().fill(Color.white.opacity(0.15)).frame(height: 1)
+                }
+                .padding(.top, 6)
+            }
+            .padding(.horizontal, 28)
         }
     }
 
@@ -1099,6 +1242,31 @@ struct OnboardingView: View {
                     } else {
                         selectedModelId = models.first?.id
                     }
+                }
+            }
+        }
+    }
+
+    /// After a successful Claude sign-in: fetch the model list with the OAuth credential (an
+    /// empty key resolves to the connected account) and mark the provider ready to continue.
+    /// A failed listing still counts as valid — the account is connected; the default model works.
+    private func validateViaClaudeAccount() {
+        isValidating = true
+        validationError = nil
+        Task {
+            let models = await ModelFetcher.fetchModels(
+                provider: .anthropic,
+                apiKey: "",
+                baseURL: LLMProvider.anthropic.defaultBaseURL
+            )
+            await MainActor.run {
+                isValidating = false
+                keyValid = true
+                availableModels = models
+                if models.contains(where: { $0.id == LLMProvider.anthropic.defaultModel }) {
+                    selectedModelId = LLMProvider.anthropic.defaultModel
+                } else {
+                    selectedModelId = models.first?.id ?? LLMProvider.anthropic.defaultModel
                 }
             }
         }
