@@ -586,6 +586,32 @@ class AppState: ObservableObject, AppStateProtocol {
         if debugEvents.count > 80 {
             debugEvents.removeFirst(debugEvents.count - 80)
         }
+        Self.persistDebugEvent("[\(timestamp)] \(message)")
+    }
+
+    /// Append a debug event to Documents/debug-events.log (ring-capped at ~200 KB). Live console
+    /// attaches require an unlocked phone at the exact launch moment — this file can be pulled
+    /// off the device at leisure (`devicectl device copy from … Documents/debug-events.log`),
+    /// which makes field diagnosis survivable.
+    nonisolated static func persistDebugEvent(_ line: String) {
+        DispatchQueue.global(qos: .utility).async {
+            guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            let url = docs.appendingPathComponent("debug-events.log")
+            let data = Data((line + "\n").utf8)
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                if (try? handle.seekToEnd()) ?? 0 > 200_000 {
+                    // Cap: keep the newest half when the log outgrows ~200 KB.
+                    if let all = try? Data(contentsOf: url) {
+                        try? all.suffix(100_000).write(to: url)
+                    }
+                    try? handle.seekToEnd()
+                }
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
     }
 
     func recordCallback(url: URL, source: String) {
@@ -909,10 +935,11 @@ class AppState: ObservableObject, AppStateProtocol {
 
         setupServiceCallbacks()
 
-        // Defer Wearables.shared calls until after onboarding (requires configure() first)
+        // Defer Wearables.shared calls until after onboarding (requires configure() first).
+        // startPermissionRequiringServices() itself observes + auto-connects — calling those
+        // two here as well DOUBLED every glasses listener (device-traced: every registration/
+        // devices/permission log line appeared twice from launch).
         if Config.hasCompletedOnboarding {
-            observeGlassesConnection()
-            autoConnectGlasses()
             startPermissionRequiringServices()
         }
 
@@ -1427,7 +1454,14 @@ class AppState: ObservableObject, AppStateProtocol {
         }
     }
 
+    /// True once the Wearables listeners below are installed — this function is reachable from
+    /// more than one startup path, and installing the listeners twice doubles every event
+    /// (and the camera-permission pre-request chain).
+    private var glassesObserversInstalled = false
+
     private func observeGlassesConnection() {
+        guard !glassesObserversInstalled else { return }
+        glassesObserversInstalled = true
         // Monitor Bluetooth audio route changes independently of WakeWordService.
         // This catches disconnects when in realtime mode or silent mode.
         NotificationCenter.default.addObserver(
@@ -2331,12 +2365,14 @@ class AppState: ObservableObject, AppStateProtocol {
     /// Transcription will check for persona names in the spoken text.
     func startDirectTranscription() {
         print("🎤 Action Button: starting direct transcription (no wake word)")
+        addDebugEvent("ActionButton: direct transcription requested (bg=\(UIApplication.shared.applicationState == .background))")
         Task {
             // Configure audio (uses glasses mic if connected, phone mic otherwise)
             await wakeWordService.configureAudioSession()
             // manual: true — this is an explicit user trigger (Action Button / Siri / tap),
             // so the reply speaks through the phone speaker even with no glasses connected.
             await handleWakeWordDetected(manual: true)
+            addDebugEvent("ActionButton: listening started (isListening=\(isListening))")
         }
     }
 
@@ -2682,6 +2718,7 @@ class AppState: ObservableObject, AppStateProtocol {
         errorMessage = nil
         speechService.playEndListeningTone()
         print("📝 Transcription: \(text)")
+        addDebugEvent("Transcription: \(String(text.prefix(80)))")
 
         // Pre-LLM voice-command chain (Plan BG P2): teleprompter, HUD task card, HUD launcher
         // selection/open, and the intent-ignore filter each get first crack at the transcript. The

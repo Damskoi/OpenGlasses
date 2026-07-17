@@ -24,7 +24,8 @@ import AppIntents
 /// connection signal*: it waits briefly for `AppStateProvider.shared` to come up
 /// rather than failing the instant it's nil. The answer is returned as a spoken
 /// `dialog`, so Siri — not the in-app TTS — reads it aloud (`speakResponse: false`).
-struct AskQuestionIntent: AppIntent {
+// AudioRecordingIntent: background mic-start rights (see AskOpenGlassesIntent).
+struct AskQuestionIntent: AppIntent, AudioRecordingIntent {
     static var title: LocalizedStringResource = "Ask OpenGlasses a Question"
     static var description = IntentDescription(
         "Ask OpenGlasses anything by voice and hear the answer, without the wake word"

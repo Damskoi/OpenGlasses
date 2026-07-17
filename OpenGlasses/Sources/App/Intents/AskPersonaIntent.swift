@@ -13,7 +13,8 @@ import AppIntents
 /// The persona is **optional**: omit it ("Ask OpenGlasses a question") and it
 /// falls back to the active persona, else the first enabled one — so this single
 /// intent serves both the generic and the persona-targeted ask.
-struct AskPersonaIntent: AppIntent {
+// AudioRecordingIntent: background mic-start rights (see AskOpenGlassesIntent).
+struct AskPersonaIntent: AppIntent, AudioRecordingIntent {
     static var title: LocalizedStringResource = "Ask a Persona"
     static var description = IntentDescription(
         "Ask a specific OpenGlasses persona by voice and hear the answer"

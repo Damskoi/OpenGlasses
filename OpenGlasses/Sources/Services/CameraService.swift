@@ -418,6 +418,7 @@ class CameraService: ObservableObject {
     private func captureFromGlasses() async throws -> Data {
         isCaptureInProgress = true
         defer { isCaptureInProgress = false }
+        idleTeardownTask?.cancel()   // a capture during the idle grace keeps the session
 
         try await ensurePermission()
 
@@ -427,21 +428,42 @@ class CameraService: ObservableObject {
         // are registered and on the user's face. Live-traced: discovery failed at +0.3s after
         // launch, link up at +4.7s. Retry with backoff (~12s window) while the link returns.
         var sessionError: Error?
+        var firstError: Error?
         for attempt in 1...4 {
             do {
                 try await ensureSession()
                 sessionError = nil
                 break
             } catch {
+                if firstError == nil { firstError = error }
                 sessionError = error
                 NSLog("[Camera] ensureSession attempt %d/4 failed: %@", attempt, error.localizedDescription)
-                await resetSession()
-                if attempt < 4 {
-                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+                if Self.isSessionAlreadyExists(error) {
+                    // The phantom is a glasses-side session still tearing down — either our
+                    // own previous one, or one LEAKED by a killed/reinstalled app instance
+                    // (nothing ever stops it; the glasses hold it until their own timeout).
+                    // Resetting again re-poisons the window — just wait it out.
+                    if attempt < 4 {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 3_000_000_000)
+                    }
+                } else {
+                    await resetSession()
+                    if attempt < 4 {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+                    }
                 }
             }
         }
-        if let sessionError { throw sessionError }
+        if let finalError = sessionError {
+            // Surface the FIRST error (the root cause), not the Nth "already exists"
+            // collision that our own retry teardown caused — unless the first error IS the
+            // busy session, which gets the actionable message.
+            let rootError = firstError ?? finalError
+            if Self.isSessionAlreadyExists(rootError) || Self.isSessionAlreadyExists(finalError) {
+                throw CameraError.sessionBusy
+            }
+            throw rootError
+        }
 
         // Wait for stream to be ready (start if needed)
         var lastError: Error?
@@ -501,15 +523,41 @@ class CameraService: ObservableObject {
             lastPhoto = image
         }
 
-        // Tear down session after capture to save battery (unless explicitly streaming).
-        // Full reset is required because MWDAT StreamSession can't reliably restart
-        // after stop — a fresh session must be created for the next capture.
+        // Keep the session WARM after capture instead of tearing it down immediately
+        // (device-traced: the glasses-side teardown lags the app-side stop, so the next
+        // capture's createSession collided with the dying session — "A session already
+        // exists for this device" — while long-lived preview sessions never hit it).
+        // Battery is protected by the idle timer: teardown happens after a quiet minute,
+        // and back-to-back photos skip the multi-second session cold-start entirely.
         if !isStreaming {
-            await resetSession()
+            scheduleIdleTeardown()
         }
 
         print("📸 Photo captured: \(photoData.count) bytes")
         return photoData
+    }
+
+    /// The SDK's one-session-per-device refusal — matched on the message because the thrown
+    /// error type differs between the create and start paths.
+    nonisolated private static func isSessionAlreadyExists(_ error: Error) -> Bool {
+        String(describing: error).localizedCaseInsensitiveContains("already exists")
+            || error.localizedDescription.localizedCaseInsensitiveContains("already exists")
+    }
+
+    /// Tear the session down after a minute of camera idleness (cancelled and re-armed by
+    /// each capture; cancelled outright when explicit streaming starts).
+    private var idleTeardownTask: Task<Void, Never>?
+    private static let sessionIdleGrace: Duration = .seconds(60)
+
+    private func scheduleIdleTeardown() {
+        idleTeardownTask?.cancel()
+        idleTeardownTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.sessionIdleGrace)
+            guard let self, !Task.isCancelled else { return }
+            guard !self.isStreaming, !self.isCaptureInProgress else { return }
+            NSLog("[Camera] Idle grace elapsed — tearing session down")
+            await self.resetSession()
+        }
     }
 
     private func handlePhotoData(_ photoData: PhotoData) {
@@ -547,6 +595,7 @@ class CameraService: ObservableObject {
     /// Start continuous video streaming from the glasses camera.
     func startStreaming() async throws {
         guard !isStreaming else { return }
+        idleTeardownTask?.cancel()   // explicit streaming owns the session now
 
         try await ensurePermission()
         try await ensureSession()
@@ -758,6 +807,7 @@ enum CameraError: LocalizedError {
     case notConnected
     case sdkNotRegistered
     case streamNotReady
+    case sessionBusy
 
     var errorDescription: String? {
         switch self {
@@ -767,6 +817,7 @@ enum CameraError: LocalizedError {
         case .notConnected: return "Glasses not connected"
         case .sdkNotRegistered: return "Meta SDK not registered — open Meta app first"
         case .streamNotReady: return "Camera stream not ready — try again"
+        case .sessionBusy: return "The glasses are still releasing a previous camera session — try again in about a minute"
         }
     }
 }

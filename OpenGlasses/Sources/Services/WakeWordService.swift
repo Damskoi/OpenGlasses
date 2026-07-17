@@ -433,7 +433,16 @@ class WakeWordService: NSObject, ObservableObject {
                 lastError = error
                 print("🎤 WakeWord: attempt \(attempt) failed: \(error.localizedDescription)")
                 cleanupAudioEngine()
-                let delay = UInt64(attempt) * 500_000_000
+                // CoreAudio '!pla' (2003329396): the AVAudioSession lost activation — usually a
+                // Bluetooth route flap mid-start (device-traced: Action-button intent in the
+                // background burned all 3 attempts inside the same broken window, then went
+                // silent). Re-activating the session before the retry is what actually
+                // recovers; the half-second sleeps alone never did.
+                if (error as NSError).code == 2003329396 || attempt > 1 {
+                    audioSessionConfigured = false
+                    await configureAudioSession()
+                }
+                let delay = UInt64(attempt) * 700_000_000
                 try? await Task.sleep(nanoseconds: delay)
             }
         }
