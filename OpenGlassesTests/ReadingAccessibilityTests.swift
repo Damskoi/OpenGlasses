@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import OpenGlasses
 
 /// Tests for ReadingProfile persistence, ReadingMode directives, and the equipment_lookup
@@ -65,6 +66,72 @@ final class ReadingAccessibilityTests: XCTestCase {
     func testReadAndDefineDirectivesAreDistinct() {
         XCTAssertTrue(ReadingMode.read.directive().contains("READ ALOUD"))
         XCTAssertTrue(ReadingMode.define.directive().contains("under 40 words"))
+    }
+
+    // MARK: - Ask mode (grounded Q&A over captured text)
+
+    func testAskModeParsesItsAliases() {
+        XCTAssertEqual(ReadingMode(rawValue: "ask"), .ask)
+        XCTAssertEqual(ReadingMode(rawValue: "question"), .ask)
+        XCTAssertEqual(ReadingMode(rawValue: "answer"), .ask)
+    }
+
+    /// The abstention contract: a low-vision user can't verify the answer, so the directive must
+    /// pin grounding (ONLY the captured text) and forbid guessing.
+    func testAskDirectiveGroundsAndForbidsGuessing() {
+        let directive = ReadingMode.ask.directive()
+        XCTAssertTrue(directive.contains("ONLY the captured text"), "Got: \(directive)")
+        XCTAssertTrue(directive.contains("do NOT guess"), "Got: \(directive)")
+        XCTAssertTrue(directive.contains("direct answer first"), "Got: \(directive)")
+    }
+
+    // MARK: - Sharpness scorer (guidance tailoring on empty OCR)
+
+    /// Solid-colour JPEG — no edges at all, so the Laplacian variance is ~0 (blurry).
+    private func flatJPEG() -> Data {
+        let size = CGSize(width: 400, height: 300)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.gray.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
+        return image.jpegData(compressionQuality: 0.9)!
+    }
+
+    /// High-contrast checkerboard — dense edges, so the variance is high (sharp).
+    private func checkerboardJPEG() -> Data {
+        let size = CGSize(width: 400, height: 300)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            UIColor.black.setFill()
+            let cell = 8
+            for row in 0..<(300 / cell) where true {
+                for col in 0..<(400 / cell) where (row + col) % 2 == 0 {
+                    ctx.fill(CGRect(x: col * cell, y: row * cell, width: cell, height: cell))
+                }
+            }
+        }
+        return image.jpegData(compressionQuality: 0.9)!
+    }
+
+    func testFlatFrameScoresBlurry() {
+        XCTAssertTrue(ImageSharpness.isBlurry(flatJPEG()), "a featureless frame reads as blurry")
+    }
+
+    func testCheckerboardScoresSharp() {
+        XCTAssertFalse(ImageSharpness.isBlurry(checkerboardJPEG()), "dense edges read as sharp")
+        let score = ImageSharpness.score(checkerboardJPEG()) ?? 0
+        XCTAssertGreaterThan(score, ImageSharpness.blurThreshold)
+    }
+
+    func testUndecodableFrameIsNeverCalledBlurry() {
+        // No evidence → no blur claim; the caller falls back to the generic guidance.
+        XCTAssertNil(ImageSharpness.score(Data([0xDE, 0xAD])))
+        XCTAssertFalse(ImageSharpness.isBlurry(Data([0xDE, 0xAD])))
     }
 
     // MARK: - equipment_lookup OCR token heuristic

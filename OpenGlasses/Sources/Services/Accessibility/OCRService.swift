@@ -70,6 +70,9 @@ struct OCRService {
             }
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
+            // Signs/menus/labels aren't always English — let Vision pick the script instead of
+            // defaulting to the device language (also feeds the translate mode better input).
+            request.automaticallyDetectsLanguage = true
 
             do {
                 try handler.perform([request])
