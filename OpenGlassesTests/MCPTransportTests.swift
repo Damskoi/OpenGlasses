@@ -182,3 +182,75 @@ final class MockURLProtocol: URLProtocol {
         return data
     }
 }
+
+// MARK: - Server config lifecycle (issue #246)
+
+/// A config change must invalidate what was discovered under the OLD config — a rotated token
+/// otherwise kept serving stale tool definitions until force-quit, and a disabled server's
+/// tools stayed callable.
+final class MCPServerLifecycleTests: XCTestCase {
+
+    /// Hermetic transport: every request answers an empty tools/list, so updateServer's
+    /// re-discovery Task never touches the network.
+    private struct EmptyToolsTransport: MCPTransport {
+        func request(_ payload: [String: Any], server: MCPServerConfig) async throws -> Data {
+            Data(#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#.utf8)
+        }
+    }
+
+    @MainActor
+    private func makeClient() -> (MCPClient, MCPServerConfig, MCPServerConfig) {
+        let client = MCPClient()
+        client.transportOverride = EmptyToolsTransport()
+        let a = MCPServerConfig(id: "a", label: "Alpha", url: "http://a/mcp",
+                                headers: ["Authorization": "Bearer old-token"], enabled: true)
+        let b = MCPServerConfig(id: "b", label: "Beta", url: "http://b/mcp", headers: [:], enabled: true)
+        client.servers = [a, b]
+        client.discoveredTools = [
+            MCPTool(name: "t1", description: "d", inputSchema: [:], serverId: "a", serverLabel: "Alpha"),
+            MCPTool(name: "t2", description: "d", inputSchema: [:], serverId: "b", serverLabel: "Beta"),
+        ]
+        return (client, a, b)
+    }
+
+    @MainActor
+    func testTokenRotationDropsThatServersToolsOnly() {
+        let (client, a, _) = makeClient()
+        var updated = a
+        updated.headers = ["Authorization": "Bearer new-token"]
+        client.updateServer(updated)
+        XCTAssertFalse(client.discoveredTools.contains { $0.serverId == "a" },
+                       "tools discovered under the old token must not survive a rotation")
+        XCTAssertTrue(client.discoveredTools.contains { $0.serverId == "b" },
+                      "other servers' tools are untouched")
+        XCTAssertEqual(client.servers.first { $0.id == "a" }?.headers["Authorization"], "Bearer new-token")
+    }
+
+    @MainActor
+    func testDisablingDropsToolsSoTheyAreNoLongerCallable() {
+        let (client, a, _) = makeClient()
+        var updated = a
+        updated.enabled = false
+        client.updateServer(updated)
+        XCTAssertFalse(client.discoveredTools.contains { $0.serverId == "a" },
+                       "a disabled server's tools must leave the offered set")
+    }
+
+    @MainActor
+    func testLabelOnlyChangeKeepsDiscoveredTools() {
+        let (client, a, _) = makeClient()
+        var updated = a
+        updated.label = "Alpha Renamed"
+        client.updateServer(updated)
+        XCTAssertTrue(client.discoveredTools.contains { $0.serverId == "a" },
+                      "a cosmetic rename must not force re-discovery")
+    }
+
+    @MainActor
+    func testRemoveServerDropsItsTools() {
+        let (client, _, _) = makeClient()
+        client.removeServer(id: "a")
+        XCTAssertFalse(client.discoveredTools.contains { $0.serverId == "a" })
+        XCTAssertNil(client.server(id: "a"))
+    }
+}

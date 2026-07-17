@@ -22,4 +22,14 @@ enum RegistrationFlow {
             ? "Waiting for device…"
             : "Approve OpenGlasses in the Meta AI app to continue…"
     }
+
+    /// Diagnostic failure message for a connect that gave up — names the stalled layer instead of
+    /// a bare "Could not connect to glasses" (issue #246: that string hid a broken registration
+    /// link-back for an entire debugging evening). Still actionable, now also diagnosable.
+    static func connectFailureMessage(stateRaw: Int) -> String {
+        if isRegistered(stateRaw: stateRaw) {
+            return "Glasses registered but no device appeared (state \(stateRaw)). Make sure the glasses are on, nearby, and connected in the Meta AI app, then try again."
+        }
+        return "Glasses registration didn't complete (state \(stateRaw)). If you approved OpenGlasses in the Meta AI app and this persists, the approval link-back may not be reaching this app — on a custom build, verify the AppLink domain and associated-domains entitlement match your bundle ID."
+    }
 }

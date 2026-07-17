@@ -1,13 +1,40 @@
 import SwiftUI
 
 /// Manage MCP (Model Context Protocol) server connections.
-/// Add servers by URL, discover their tools, enable/disable.
+/// Add servers by URL, edit them in place, discover their tools, enable/disable.
+///
+/// All mutations go through the LIVE `appState.mcpClient` — issue #246: this view used to edit a
+/// private copy and write UserDefaults directly, so the running client kept using the old config
+/// (deleted servers stayed callable, a rotated token wasn't sent until force-quit).
 struct MCPServersView: View {
     @EnvironmentObject var appState: AppState
-    @State private var servers: [MCPServerConfig] = Config.mcpServers
     @State private var showAddSheet = false
+    @State private var editingServer: MCPServerConfig?
     @State private var discoveredCount: Int = 0
     @State private var isDiscovering = false
+
+    var body: some View {
+        // Nested ObservableObjects don't propagate through @EnvironmentObject — observe the
+        // client directly so the list re-renders on add/edit/delete.
+        MCPServersList(
+            mcpClient: appState.mcpClient,
+            showAddSheet: $showAddSheet,
+            editingServer: $editingServer,
+            discoveredCount: $discoveredCount,
+            isDiscovering: $isDiscovering
+        )
+    }
+}
+
+private struct MCPServersList: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject var mcpClient: MCPClient
+    @Binding var showAddSheet: Bool
+    @Binding var editingServer: MCPServerConfig?
+    @Binding var discoveredCount: Int
+    @Binding var isDiscovering: Bool
+
+    private var servers: [MCPServerConfig] { mcpClient.servers }
 
     var body: some View {
         List {
@@ -20,39 +47,46 @@ struct MCPServersView: View {
                 } else {
                     ForEach(servers) { server in
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(server.label)
-                                        .foregroundStyle(Color(.label))
+                            // Tap the row to EDIT (issue #246: rotating a token used to require
+                            // delete + re-add).
+                            Button {
+                                editingServer = server
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(server.label)
+                                            .foregroundStyle(Color(.label))
+                                            .lineLimit(1)
+                                        Circle()
+                                            .fill(server.enabled ? .green : .gray)
+                                            .frame(width: 8, height: 8)
+                                            .accessibilityHidden(true)
+                                    }
+                                    Text(server.url)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                         .lineLimit(1)
-                                    Circle()
-                                        .fill(server.enabled ? .green : .gray)
-                                        .frame(width: 8, height: 8)
-                                        .accessibilityHidden(true)
                                 }
-                                Text(server.url)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
                             Spacer()
                             Toggle("Enable \(server.label)", isOn: Binding(
                                 get: { server.enabled },
                                 set: { enabled in
-                                    if let idx = servers.firstIndex(where: { $0.id == server.id }) {
-                                        servers[idx].enabled = enabled
-                                        Config.setMCPServers(servers)
-                                    }
+                                    var updated = server
+                                    updated.enabled = enabled
+                                    mcpClient.updateServer(updated)
                                 }
                             ))
                             .labelsHidden()
                         }
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel("\(server.label), \(server.enabled ? "enabled" : "disabled"). \(server.url)")
+                        .accessibilityHint("Double-tap to edit")
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
-                                servers.removeAll { $0.id == server.id }
-                                Config.setMCPServers(servers)
+                                mcpClient.removeServer(id: server.id)
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
@@ -62,15 +96,14 @@ struct MCPServersView: View {
             } header: {
                 Text("MCP Servers")
             } footer: {
-                Text("MCP servers expose tools the AI can call. Popular servers: Home Assistant, Notion, GitHub, Slack, and more.")
+                Text("MCP servers expose tools the AI can call. Tap a server to edit it (URL, token, transport). Popular servers: Home Assistant, Notion, GitHub, Slack, and more.")
             }
 
             // MARK: Catalogue (Plan V) — one-tap install of vetted servers
             Section {
                 NavigationLink {
                     MCPCatalogView { newServer in
-                        servers.append(newServer)
-                        Config.setMCPServers(servers)
+                        mcpClient.addServer(newServer)
                     }
                 } label: {
                     Label("Browse catalogue", systemImage: "square.grid.2x2")
@@ -147,8 +180,12 @@ struct MCPServersView: View {
         }
         .sheet(isPresented: $showAddSheet) {
             MCPServerEditorView { newServer in
-                servers.append(newServer)
-                Config.setMCPServers(servers)
+                mcpClient.addServer(newServer)
+            }
+        }
+        .sheet(item: $editingServer) { server in
+            MCPServerEditorView(prefill: server, isEditing: true) { updated in
+                mcpClient.updateServer(updated)
             }
         }
     }
@@ -156,8 +193,8 @@ struct MCPServersView: View {
     private func discover() {
         isDiscovering = true
         Task {
-            await appState.mcpClient.discoverAllTools()
-            discoveredCount = appState.mcpClient.discoveredTools.count
+            await mcpClient.discoverAllTools()
+            discoveredCount = mcpClient.discoveredTools.count
             isDiscovering = false
         }
     }
@@ -177,17 +214,25 @@ struct MCPServerEditorView: View {
     @State private var transport: MCPTransportKind
     @State private var authKind: MCPAuthKind
 
+    /// Edit mode (issue #246): preserves the server's identity/enabled/policy so a token rotation
+    /// or URL fix is an in-place update, not a delete-and-re-add.
+    private let isEditing: Bool
+    private let existing: MCPServerConfig?
+
     /// `prefill` seeds the form (catalogue one-tap install lands here with label/url/transport/auth
     /// already set); the user can still edit anything before saving. Defaults to a blank manual add.
-    init(prefill: MCPServerConfig? = nil, onSave: @escaping (MCPServerConfig) -> Void) {
+    /// With `isEditing: true`, saving keeps the prefilled server's id (and enabled/policy).
+    init(prefill: MCPServerConfig? = nil, isEditing: Bool = false, onSave: @escaping (MCPServerConfig) -> Void) {
         self.onSave = onSave
+        self.isEditing = isEditing
+        self.existing = prefill
         _label      = State(initialValue: prefill?.label ?? "")
         _url        = State(initialValue: prefill?.url ?? "")
         _transport  = State(initialValue: prefill?.transport ?? .http)
         _authKind   = State(initialValue: prefill?.authKind ?? .bearer)
-        let existing = prefill?.headers.first
-        _authHeader = State(initialValue: existing?.key ?? "Authorization")
-        _authValue  = State(initialValue: existing?.value ?? "")
+        let existingHeader = prefill?.headers.first
+        _authHeader = State(initialValue: existingHeader?.key ?? "Authorization")
+        _authValue  = State(initialValue: existingHeader?.value ?? "")
     }
 
     var body: some View {
@@ -229,25 +274,26 @@ struct MCPServerEditorView: View {
                     }
                 }
             }
-            .navigationTitle(label.isEmpty ? "Add MCP Server" : "Add \(label)")
+            .navigationTitle(isEditing ? "Edit \(existing?.label ?? "Server")"
+                                       : (label.isEmpty ? "Add MCP Server" : "Add \(label)"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
+                    Button(isEditing ? "Save" : "Add") {
                         var headers: [String: String] = [:]
                         if !authHeader.isEmpty && !authValue.isEmpty {
                             headers[authHeader] = authValue
                         }
                         let server = MCPServerConfig(
-                            id: UUID().uuidString,
+                            id: (isEditing ? existing?.id : nil) ?? UUID().uuidString,
                             label: label.trimmingCharacters(in: .whitespaces),
                             url: url.trimmingCharacters(in: .whitespaces),
                             headers: headers,
-                            enabled: true,
-                            policy: .redact,          // safe default (Plan R) — same as a catalogue install
+                            enabled: (isEditing ? existing?.enabled : nil) ?? true,
+                            policy: (isEditing ? existing?.policy : nil) ?? .redact,   // safe default (Plan R)
                             transport: transport,
                             authKind: authKind
                         )
