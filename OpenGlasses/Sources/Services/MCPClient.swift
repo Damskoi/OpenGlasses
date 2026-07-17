@@ -166,9 +166,25 @@ final class MCPClient: ObservableObject {
     }
 
     func updateServer(_ server: MCPServerConfig) {
-        if let idx = servers.firstIndex(where: { $0.id == server.id }) {
-            servers[idx] = server
-            Config.setMCPServers(servers)
+        guard let idx = servers.firstIndex(where: { $0.id == server.id }) else { return }
+        let old = servers[idx]
+        servers[idx] = server
+        Config.setMCPServers(servers)
+
+        // Issue #246: config changes must invalidate what was discovered under the OLD config —
+        // a rotated token or changed URL otherwise keeps serving stale tool definitions (and a
+        // disabled server's tools stayed callable). Re-discover live when the server remains
+        // enabled and something material changed, so the catalogue heals without a manual tap.
+        let materialChange = old.url != server.url || old.headers != server.headers
+            || old.transport != server.transport || old.enabled != server.enabled
+        guard materialChange else { return }
+        discoveredTools.removeAll { $0.serverId == server.id }
+        if server.enabled {
+            Task { [weak self] in
+                guard let self else { return }
+                let tools = await self.discoverTools(from: server)
+                self.discoveredTools.append(contentsOf: tools)
+            }
         }
     }
 

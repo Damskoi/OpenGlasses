@@ -3526,7 +3526,9 @@ class AppState: ObservableObject, AppStateProtocol {
         }
 
         guard isConnected else {
-            errorMessage = "Could not connect to glasses"
+            let stateRaw = Wearables.shared.registrationState.rawValue
+            errorMessage = RegistrationFlow.connectFailureMessage(stateRaw: stateRaw)
+            addDebugEvent("connectAndListen gave up: registrationState=\(stateRaw)")
             return
         }
 

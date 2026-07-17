@@ -122,7 +122,8 @@ final class NativeToolRouter {
         // 2. Check MCP servers for the tool (matched on its fully-qualified, namespace-isolated
         //    name so a server can't shadow a native tool). Blocked (tool-poisoned) tools are
         //    never matched here, so the model can't reach them.
-        if let mcp = mcpClient, let tool = mcp.offeredTool(matching: name), let server = mcp.server(id: tool.serverId) {
+        if let mcp = mcpClient, let tool = mcp.offeredTool(matching: name),
+           let server = mcp.server(id: tool.serverId), server.enabled {
             // Outbound egress screen (Plan R): secrets/PII never leave the device for a
             // third-party server. A `.block` verdict is treated like a declined confirmation —
             // no network call, and a failure the model is told not to retry.

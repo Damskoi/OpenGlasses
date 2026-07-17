@@ -417,6 +417,20 @@ Host an `apple-app-site-association` file at `https://YOUR-DOMAIN/.well-known/ap
 }
 ```
 
+**Both ends must match your build, or registration silently never completes** (#246):
+
+- The AASA `appID` must be **your** Team ID + bundle ID — a copied AASA still declaring the upstream app makes iOS refuse the domain association.
+- Your entitlements file must contain the **associated-domains** entitlement for the same domain (`applinks:YOUR-DOMAIN`). Without it, iOS never even attempts the link-back. If you use a personal entitlements overlay, check it has:
+
+```xml
+<key>com.apple.developer.associated-domains</key>
+<array>
+    <string>applinks:YOUR-DOMAIN</string>
+</array>
+```
+
+The failure mode when either end is wrong: approval completes in the Meta AI app, but the approval callback (a Universal Link) never reaches OpenGlasses — registration never finalises, the devices listener never fires, and connecting fails. The in-app error names the stalled registration state and points here.
+
 ### 5. Enable Developer Mode
 
 On iPhone: Meta AI app → Settings → About → tap version number **5 times** → toggle Developer Mode on.
