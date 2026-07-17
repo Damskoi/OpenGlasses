@@ -1,6 +1,21 @@
 # Plan BW — ChatGPT Subscription Sign-In (Codex OAuth provider)
 
-**Status: 📋 Planned (2026-07-18).** "Sign in with ChatGPT" as a no-API-key way to run OpenAI
+**Status: 🚧 Shipped through P4's code half (2026-07-18) — on-device verification checklist
+pending.** P1 (`ChatGPTOAuth` + shared `PKCE`/`OAuthCodeInput`), P2 (`ResponsesTranslator` +
+stream accumulator), P3 (`ChatGPTOAuthService`, `LLMProvider.chatgpt`, `sendChatGPT`, shared
+`OAuthSignInRows` in the model editor), and P4's codeable half — stateless helpers
+(summarization, `analyzeFrame`, structured vision/completion via forced function-call), the
+shared `DarkAccountSignInSection` powering both the Claude and ChatGPT onboarding sections,
+and the onboarding provider tile — are implemented with headless tests. Cascade
+classification needed no change (429 quota → hop, 401/403 → skip candidate, no sign-in →
+skip candidate). Design deviation from the plan text: the provider's history is stored in
+the **chat shape** and translated to Responses items at request time, so `HistoryHygiene`
+needed no new image matcher (a test pins that instead). **Still open (needs the phone + a
+real ChatGPT account): the P4 live checklist below — the onboarding tile shipped ahead of
+the voice-quality listen (deliberate; pulling one card is trivial if codex answers sound
+wrong), so run the checklist before any release.**
+
+"Sign in with ChatGPT" as a no-API-key way to run OpenAI
 models, mirroring the shipped Claude account sign-in (`ClaudeOAuth` / `ClaudeOAuthService` +
 the onboarding surface from the build-320 PR). OpenAI explicitly supports subscription OAuth
 in external tools now — but the token it grants authenticates against the **ChatGPT Codex
@@ -73,10 +88,20 @@ Structural facts the design hangs on:
 
 ## P4 — Live verification (device)
 
-Real login (device-code on phone), then: a streamed text turn, a tool turn (native + MCP),
-an image turn, token refresh across an expiry, quota-exhaustion error taxonomy captured into
-the cascade classifier. Decide the onboarding-tile question with real transcripts. Document
-the Realtime exclusion in Settings copy.
+**Code half: shipped** — stateless helpers, onboarding tile + sign-in page, cascade taxonomy
+confirmed covered. **Live half: pending, needs the phone + a real ChatGPT account:**
+
+- [ ] Sign in (browser → copy the localhost callback URL from the address bar → paste).
+- [ ] One streamed text turn (Chat tab), one buffered voice turn.
+- [ ] One tool turn (a native tool AND an MCP tool) — watch the `ChatGPT turn: N tool
+      call(s) parsed` log line.
+- [ ] One image turn (photo question) — confirms `input_image` acceptance on codex models.
+- [ ] Token refresh across an expiry (leave the app overnight, ask again).
+- [ ] Verify the endpoint constants against the live service (the P1 constants block is
+      captured-at-implementation and unverified until this runs).
+- [ ] **Listen to voice-answer quality** on codex models — decide whether the onboarding
+      tile stays, and whether the default model changes.
+- [ ] Confirm quota-exhaustion surfaces as a 429 (cascade hop) and note the error body.
 
 ## Explicitly out of scope
 

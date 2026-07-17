@@ -26,6 +26,9 @@ struct ModelConfig: Codable, Identifiable, Equatable {
         switch provider {
         case .anthropic, .gemini, .openai:
             return true
+        case .chatgpt:
+            // Codex models accept image input over the Responses backend (BW P4 verifies live).
+            return true
         case .groq, .local, .appleOnDevice:
             return false
         case .qwen:

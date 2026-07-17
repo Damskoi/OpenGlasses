@@ -28,11 +28,9 @@ struct ModelFormView: View {
     @State private var discoveredServers: [LocalServerScanner.DiscoveredServer] = []
     @State private var scanMessage: String?
 
-    // "Sign in with Claude" OAuth state (Anthropic only)
+    // Account sign-in state (Anthropic + ChatGPT — rendered via the shared OAuthSignInRows)
     @ObservedObject private var claudeOAuth = ClaudeOAuthService.shared
-    @State private var showOAuthCodeField = false
-    @State private var oauthCode = ""
-    @State private var isExchangingOAuthCode = false
+    @ObservedObject private var chatgptOAuth = ChatGPTOAuthService.shared
 
     var body: some View {
         Section {
@@ -107,11 +105,31 @@ struct ModelFormView: View {
             // MARK: Cloud API key section
             Section {
                 if selectedProvider == .anthropic {
-                    claudeSignInRows
+                    OAuthSignInRows(
+                        service: claudeOAuth,
+                        signInLabel: "Sign in with Claude",
+                        connectedLabel: "Claude account connected",
+                        connectedCaption: "Requests use your Claude subscription unless an API key is set below.",
+                        pasteInstructions: "Sign in in the browser, copy the code shown on the callback page, then paste it here.",
+                        onChange: resetModelList
+                    )
+                }
+                if selectedProvider == .chatgpt {
+                    OAuthSignInRows(
+                        service: chatgptOAuth,
+                        signInLabel: "Sign in with ChatGPT",
+                        connectedLabel: "ChatGPT account connected",
+                        connectedCaption: "Requests use your ChatGPT subscription (codex models). Realtime voice still needs an OpenAI API key model.",
+                        pasteInstructions: "Sign in in the browser. When it ends on a localhost page that can't connect, copy the full URL from the address bar and paste it here.",
+                        onChange: resetModelList
+                    )
                 }
 
-                SecretInputField(placeholder: anthropicKeyPlaceholder, text: $apiKey)
-                    .onChange(of: apiKey) { _, _ in resetModelList() }
+                // ChatGPT authenticates via the account sign-in only — there is no key to paste.
+                if selectedProvider != .chatgpt {
+                    SecretInputField(placeholder: anthropicKeyPlaceholder, text: $apiKey)
+                        .onChange(of: apiKey) { _, _ in resetModelList() }
+                }
 
                 if let url = selectedProvider.consoleURL {
                     Link(destination: url) {
@@ -166,7 +184,7 @@ struct ModelFormView: View {
                         }
                     }
                 }
-                .disabled((apiKey.isEmpty && selectedProvider != .custom && !anthropicOAuthReady) || isFetchingModels)
+                .disabled((apiKey.isEmpty && selectedProvider != .custom && !accountOAuthReady) || isFetchingModels)
 
                 if let error = fetchError {
                     Label(error, systemImage: "xmark.circle")
@@ -331,6 +349,7 @@ struct ModelFormView: View {
         switch selectedProvider {
         case .anthropic: return "Get your API key at console.anthropic.com"
         case .openai: return "Get your API key at platform.openai.com"
+        case .chatgpt: return "Sign in with your ChatGPT account — uses your subscription, no API key. Serves the codex model family."
         case .gemini: return "Get your API key at aistudio.google.com"
         case .groq: return "Get your API key at console.groq.com"
         case .zai: return "Z.ai subscription — OpenAI-compatible API"
@@ -344,11 +363,12 @@ struct ModelFormView: View {
         }
     }
 
-    // MARK: - Sign in with Claude (OAuth)
+    // MARK: - Account sign-in (OAuth)
 
-    /// True when the Anthropic provider can authenticate without a pasted key.
-    private var anthropicOAuthReady: Bool {
-        selectedProvider == .anthropic && claudeOAuth.isConnected
+    /// True when the selected provider can authenticate without a pasted key.
+    private var accountOAuthReady: Bool {
+        (selectedProvider == .anthropic && claudeOAuth.isConnected)
+            || (selectedProvider == .chatgpt && chatgptOAuth.isConnected)
     }
 
     private var anthropicKeyPlaceholder: String {
@@ -356,77 +376,6 @@ struct ModelFormView: View {
         case .custom: return "API Key (optional for local servers)"
         case .anthropic: return claudeOAuth.isConnected ? "API Key (optional — account connected)" : "API Key"
         default: return "API Key"
-        }
-    }
-
-    @ViewBuilder
-    private var claudeSignInRows: some View {
-        if claudeOAuth.isConnected {
-            HStack {
-                Image(systemName: "checkmark.seal.fill")
-                    .foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Claude account connected")
-                    Text("Requests use your Claude subscription unless an API key is set below.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Sign out", role: .destructive) {
-                    claudeOAuth.signOut()
-                }
-                .buttonStyle(.borderless)
-            }
-        } else {
-            Button {
-                if let url = claudeOAuth.beginSignIn() {
-                    UIApplication.shared.open(url)
-                    showOAuthCodeField = true
-                }
-            } label: {
-                Label("Sign in with Claude", systemImage: "person.crop.circle.badge.checkmark")
-            }
-
-            if showOAuthCodeField {
-                TextField("Paste authorization code", text: $oauthCode)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .font(.footnote.monospaced())
-
-                Button {
-                    Task {
-                        isExchangingOAuthCode = true
-                        let ok = await claudeOAuth.completeSignIn(pastedCode: oauthCode)
-                        isExchangingOAuthCode = false
-                        if ok {
-                            oauthCode = ""
-                            showOAuthCodeField = false
-                            resetModelList()
-                        }
-                    }
-                } label: {
-                    HStack {
-                        if isExchangingOAuthCode {
-                            ProgressView().scaleEffect(0.8)
-                            Text("Connecting…")
-                        } else {
-                            Image(systemName: "link")
-                            Text("Connect")
-                        }
-                    }
-                }
-                .disabled(oauthCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isExchangingOAuthCode)
-
-                Text("Sign in in the browser, copy the code shown on the callback page, then paste it here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let error = claudeOAuth.lastError {
-                Label(error, systemImage: "xmark.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            }
         }
     }
 

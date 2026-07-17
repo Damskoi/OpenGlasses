@@ -59,9 +59,12 @@ enum ModelFetcher {
     static func fetchModels(provider: LLMProvider, apiKey: String, baseURL: String) async -> [RemoteModel] {
         // Local OpenAI-compatible servers (Ollama, llama.cpp, LM Studio, vLLM…) usually
         // need no API key, so let the custom provider list models without one.
-        guard !apiKey.isEmpty || provider == .custom || provider == .anthropic else { return [] }
+        guard !apiKey.isEmpty || provider == .custom || provider == .anthropic || provider == .chatgpt else { return [] }
 
         switch provider {
+        case .chatgpt:
+            // Subscription auth serves a fixed codex catalog — no key-based listing endpoint.
+            return ChatGPTOAuth.modelCatalog.map { RemoteModel(id: $0, name: $0) }
         case .anthropic:
             return await fetchAnthropic(apiKey: apiKey)
         case .gemini:
