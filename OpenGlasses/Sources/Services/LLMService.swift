@@ -7,6 +7,7 @@ import FoundationModels
 enum LLMProvider: String, CaseIterable {
     case anthropic = "anthropic"
     case openai = "openai"
+    case chatgpt = "chatgpt"   // ChatGPT subscription (Codex OAuth) — Responses backend, no API key (Plan BW)
     case gemini = "gemini"
     case groq = "groq"
     case zai = "zai"
@@ -22,6 +23,7 @@ enum LLMProvider: String, CaseIterable {
         switch self {
         case .anthropic: return "Anthropic (Claude)"
         case .openai: return "OpenAI (GPT)"
+        case .chatgpt: return "ChatGPT (Subscription)"
         case .gemini: return "Google (Gemini)"
         case .groq: return "Groq"
         case .zai: return "Z.ai (Subscription)"
@@ -46,14 +48,15 @@ enum LLMProvider: String, CaseIterable {
         case .xai: return URL(string: "https://console.x.ai")
         case .openrouter: return URL(string: "https://openrouter.ai/keys")
         case .qwen: return URL(string: "https://dashscope.console.aliyun.com/apiKey")
-        case .zai, .custom, .local, .appleOnDevice: return nil
+        case .zai, .chatgpt, .custom, .local, .appleOnDevice: return nil
         }
     }
 
     /// Whether this provider uses the OpenAI-compatible API format
     var isOpenAICompatible: Bool {
         switch self {
-        case .anthropic, .gemini, .local, .appleOnDevice: return false
+        // .chatgpt speaks the Responses API, not chat completions — its own send path.
+        case .anthropic, .gemini, .chatgpt, .local, .appleOnDevice: return false
         case .openai, .groq, .zai, .qwen, .minimax, .xai, .openrouter, .custom: return true
         }
     }
@@ -63,6 +66,7 @@ enum LLMProvider: String, CaseIterable {
         switch self {
         case .anthropic: return "https://api.anthropic.com/v1/messages"
         case .openai: return "https://api.openai.com/v1/chat/completions"
+        case .chatgpt: return ChatGPTOAuth.backendResponsesURL
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
         case .groq: return "https://api.groq.com/openai/v1/chat/completions"
         case .zai: return "https://api.z.ai/api/coding/paas/v4/chat/completions"
@@ -81,6 +85,7 @@ enum LLMProvider: String, CaseIterable {
         switch self {
         case .anthropic: return "claude-sonnet-5"
         case .openai: return "gpt-4o"
+        case .chatgpt: return ChatGPTOAuth.defaultModel
         case .gemini: return "gemini-2.0-flash"
         case .groq: return "llama-3.3-70b-versatile"
         case .zai: return "glm-4.5"
@@ -105,7 +110,7 @@ enum LLMProvider: String, CaseIterable {
     /// Whether this provider requires an API key
     var requiresAPIKey: Bool {
         switch self {
-        case .local, .appleOnDevice: return false
+        case .local, .appleOnDevice, .chatgpt: return false   // .chatgpt authenticates via account sign-in
         default: return true
         }
     }
@@ -114,7 +119,7 @@ enum LLMProvider: String, CaseIterable {
     var supportsModelListing: Bool {
         switch self {
         case .local, .appleOnDevice: return false
-        default: return true
+        default: return true   // .chatgpt lists from its static codex catalog
         }
     }
 }
@@ -530,6 +535,8 @@ class LLMService: ObservableObject {
         switch provider {
         case .anthropic:
             rawResponse = try await sendAnthropic(text, systemPrompt: fullPrompt, config: modelConfig, includeTools: includeTools, imageData: imageData, onToken: onToken, onStreamReset: onStreamReset)
+        case .chatgpt:
+            rawResponse = try await sendChatGPT(text, systemPrompt: fullPrompt, config: modelConfig, includeTools: includeTools, imageData: imageData, onToken: onToken, onStreamReset: onStreamReset)
         case .gemini:
             rawResponse = try await sendGemini(text, systemPrompt: fullPrompt, config: modelConfig, includeTools: includeTools, imageData: imageData)
         case .local:
@@ -666,6 +673,8 @@ class LLMService: ObservableObject {
         switch config.llmProvider {
         case .anthropic:
             return try await sendAnthropic(text, systemPrompt: system, config: config, includeTools: false, imageData: nil)
+        case .chatgpt:
+            return try await sendChatGPT(text, systemPrompt: system, config: config, includeTools: false, imageData: nil)
         case .gemini:
             return try await sendGemini(text, systemPrompt: system, config: config, includeTools: false, imageData: nil)
         case .local:
@@ -927,6 +936,14 @@ class LLMService: ObservableObject {
                       let text = parts.first?["text"] as? String else { return nil }
                 return text
 
+            case .chatgpt:
+                guard let json = await chatgptStatelessResponse(
+                    model: modelConfig.model,
+                    instructions: "You are a conversation summarizer. Be concise and factual.",
+                    userContent: summarizationPrompt, timeout: 15) else { return nil }
+                let text = ResponsesTranslator.parseOutput(json).text
+                return text.isEmpty ? nil : text
+
             case .local, .appleOnDevice:
                 // Not worth running summarization on local models — use heuristic
                 return nil
@@ -1025,6 +1042,17 @@ class LLMService: ObservableObject {
                       let parts = content["parts"] as? [[String: Any]],
                       let text = parts.first?["text"] as? String else { return nil }
                 return text
+
+            case .chatgpt:
+                guard let json = await chatgptStatelessResponse(
+                    model: modelConfig.model, instructions: systemPrompt,
+                    userContent: [
+                        ["type": "text", "text": userText],
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]],
+                    ] as [[String: Any]],
+                    timeout: 20) else { return nil }
+                let text = ResponsesTranslator.parseOutput(json).text
+                return text.isEmpty ? nil : text
 
             case .local, .appleOnDevice:
                 return nil
@@ -1129,6 +1157,15 @@ class LLMService: ObservableObject {
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
                 return StructuredVisionParser.gemini(data)
 
+            case .chatgpt:
+                return await chatgptStatelessStructured(
+                    model: modelConfig.model, instructions: systemPrompt,
+                    userContent: [
+                        ["type": "text", "text": userText],
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]],
+                    ] as [[String: Any]],
+                    toolName: toolName, toolDescription: toolDescription, jsonSchema: jsonSchema)
+
             case .local, .appleOnDevice:
                 // On-device structured vision isn't supported here; the caller may fall back.
                 return nil
@@ -1217,6 +1254,11 @@ class LLMService: ObservableObject {
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
                 return StructuredVisionParser.gemini(data)
 
+            case .chatgpt:
+                return await chatgptStatelessStructured(
+                    model: modelConfig.model, instructions: systemPrompt, userContent: userText,
+                    toolName: toolName, toolDescription: toolDescription, jsonSchema: jsonSchema)
+
             case .appleOnDevice:
                 let prompt = systemPrompt + "\n\nReturn ONLY a single valid JSON object matching the requested shape — no prose, no code fences."
                 let text = try await sendAppleOnDevice(userText, systemPrompt: prompt)
@@ -1246,6 +1288,8 @@ class LLMService: ObservableObject {
         switch config.llmProvider {
         case .anthropic:
             return try await sendAnthropic(text, systemPrompt: systemPrompt, config: config, includeTools: includeTools, imageData: nil)
+        case .chatgpt:
+            return try await sendChatGPT(text, systemPrompt: systemPrompt, config: config, includeTools: includeTools, imageData: nil)
         case .gemini:
             return try await sendGemini(text, systemPrompt: systemPrompt, config: config, includeTools: includeTools, imageData: nil)
         case .local, .appleOnDevice:
@@ -1741,6 +1785,212 @@ class LLMService: ObservableObject {
 
         return try await runToolLoop(maxIterations: maxToolCallIterations, adapter: adapter,
                                      setStatus: { [weak self] in self?.toolCallStatus = $0 })
+    }
+
+    // MARK: - ChatGPT subscription (Responses backend, Plan BW P3)
+
+    /// Send via the ChatGPT subscription provider: bearer OAuth token + account-id header
+    /// against the Responses backend. History stays in the chat shape (`ResponsesTranslator`
+    /// converts to Responses items at request time), so history hygiene, pruning, and
+    /// persistence behave exactly like the OpenAI-compatible path.
+    private func sendChatGPT(_ text: String, systemPrompt: String, config: ModelConfig, includeTools: Bool, imageData: Data?, onToken: ((String) -> Void)? = nil, onStreamReset: (() -> Void)? = nil) async throws -> String {
+        guard let token = await ChatGPTOAuthService.shared.validAccessToken() else {
+            throw LLMError.missingAPIKey("ChatGPT account not connected — sign in with ChatGPT in the model editor")
+        }
+        let accountID = ChatGPTOAuthService.shared.accountID
+        let endpoint = config.baseURL.isEmpty ? ChatGPTOAuth.backendResponsesURL : config.baseURL
+        guard let url = URL(string: endpoint) else {
+            throw LLMError.invalidConfiguration("Invalid ChatGPT backend URL: \(endpoint)")
+        }
+
+        // Append the user turn in chat shape (image as image_url, so pruning recognises it).
+        if let imageData, config.visionEnabled {
+            let base64 = LLMImagePreparer.prepared(imageData).base64EncodedString()
+            conversationHistory.append(["role": "user", "content": [
+                ["type": "text", "text": text],
+                ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]],
+            ]])
+        } else if imageData != nil {
+            conversationHistory.append(["role": "user", "content": text + "\n[System note: The user attempted to send an image, but vision is disabled for this model configuration.]"])
+        } else {
+            conversationHistory.append(["role": "user", "content": text])
+        }
+        trimHistory()
+
+        var chatTools: [[String: Any]]?
+        if includeTools {
+            let includeOpenClaw = Config.isOpenClawAgentActive && openClawBridge != nil
+            chatTools = ToolDeclarations.openAITools(registry: nativeToolRouter?.registry, includeOpenClaw: includeOpenClaw, mcpClient: nativeToolRouter?.mcpClient)
+        }
+        let tools = chatTools
+
+        let adapter = ProviderLoopAdapter(
+            label: "ChatGPT",
+            dispatcher: makeToolDispatcher(),
+            performTurn: { [weak self] in
+                guard let self else { throw LLMError.invalidResponse("ChatGPT") }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                ChatGPTAuth.apply(credential: token, accountID: accountID, to: &request)
+                let streaming = onToken != nil
+                let body = ResponsesTranslator.requestBody(
+                    model: config.model, instructions: systemPrompt,
+                    history: self.conversationHistory, tools: tools, stream: streaming)
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                request.timeoutInterval = 120
+
+                let responseJSON: [String: Any]
+                if streaming, let onToken {
+                    // New tool-loop iteration: clear the caller's accumulated bubble first (BM P9).
+                    onStreamReset?()
+                    responseJSON = try await self.streamResponsesTurn(request: request, onToken: onToken)
+                } else {
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    guard status == 200 else {
+                        let bodyText = String(data: data, encoding: .utf8) ?? ""
+                        NSLog("[LLMService] ChatGPT backend error %d: %@", status, String(bodyText.prefix(300)))
+                        throw LLMError.apiError(provider: "ChatGPT", statusCode: status, message: String(bodyText.prefix(300)))
+                    }
+                    responseJSON = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                }
+
+                let parsed = ResponsesTranslator.parseOutput(responseJSON)
+                // The parse-vs-sent diagnostic seam — where "tool_call returned but nothing
+                // executed" bugs get caught.
+                NSLog("[LLMService] ChatGPT turn: %d tool call(s) parsed%@", parsed.toolCalls.count,
+                      parsed.toolCalls.isEmpty ? "" : " → " + parsed.toolCalls.map(\.name).joined(separator: ", "))
+                self.recordUsage(provider: .chatgpt, model: config.model, json: responseJSON)
+                return AssistantTurn(text: parsed.text, toolCalls: parsed.toolCalls, payload: responseJSON)
+            },
+            appendAssistantToolCall: { [weak self] turn in
+                guard let self else { return }
+                self.conversationHistory.append(
+                    ResponsesTranslator.assistantHistoryMessage(text: turn.text, toolCalls: turn.toolCalls))
+            },
+            appendToolResults: { [weak self] outcomes in
+                guard let self else { return }
+                for outcome in outcomes {
+                    guard let callId = outcome.invocation.id else { continue }
+                    let resultContent: String
+                    switch outcome.result {
+                    case .success(let text): resultContent = text
+                    case .failure(let error): resultContent = "Error: \(error)"
+                    }
+                    // Frame untrusted external content as data, not instructions.
+                    let framed = self.wrapToolResultForModel(toolName: outcome.invocation.name, content: resultContent)
+                    self.conversationHistory.append(["role": "tool", "tool_call_id": callId, "content": framed])
+                }
+            },
+            finalize: { [weak self] turn in
+                guard let self else { throw LLMError.invalidResponse("ChatGPT") }
+                // Lenient like the other paths — an empty final text is appended, not thrown.
+                self.conversationHistory.append(["role": "assistant", "content": turn.text])
+                return turn.text
+            }
+        )
+        return try await runToolLoop(maxIterations: maxToolCallIterations, adapter: adapter,
+                                     setStatus: { [weak self] in self?.toolCallStatus = $0 })
+    }
+
+    /// One streamed Responses turn: SSE events → `onToken` text deltas; returns the
+    /// authoritative `response.completed` payload (a shed delta is cosmetic, never corrupting).
+    /// Events are fed to the parser only at blank-line boundaries so a network chunk can't
+    /// shear a multi-byte character or a JSON payload.
+    private func streamResponsesTurn(request: URLRequest, onToken: @escaping (String) -> Void) async throws -> [String: Any] {
+        let (bytes, response) = try await streamingSession.bytes(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            var errorBody = Data()
+            for try await byte in bytes {
+                errorBody.append(byte)
+                if errorBody.count > 2048 { break }
+            }
+            let text = String(data: errorBody, encoding: .utf8) ?? ""
+            throw LLMError.apiError(provider: "ChatGPT", statusCode: status, message: String(text.prefix(300)))
+        }
+
+        var parser = SSEEventParser()
+        var accumulator = ResponsesTranslator.StreamAccumulator()
+        var buffer = Data()
+
+        func feed(_ chunk: String, flush: Bool = false) {
+            var events = parser.consume(chunk)
+            if flush { events += parser.flush() }
+            for event in events {
+                if let delta = accumulator.consume(event) { onToken(delta) }
+            }
+        }
+
+        for try await byte in bytes {
+            buffer.append(byte)
+            if byte == 0x0A, buffer.count >= 2, buffer[buffer.count - 2] == 0x0A {
+                feed(String(decoding: buffer, as: UTF8.self))
+                buffer.removeAll(keepingCapacity: true)
+            }
+        }
+        feed(String(decoding: buffer, as: UTF8.self), flush: true)
+
+        if let failure = accumulator.failureMessage {
+            throw LLMError.apiError(provider: "ChatGPT", statusCode: 200, message: failure)
+        }
+        guard let completed = accumulator.completedResponse else {
+            throw LLMError.invalidResponse("ChatGPT (stream ended without completion)")
+        }
+        return completed
+    }
+
+    /// One stateless Responses-backend request (BW P4): no conversation-history mutation.
+    /// `responseTools`, when given, are already in the Responses shape; `forcedToolName`
+    /// forces that function. Returns the raw response JSON, or nil on any failure — callers
+    /// treat nil as "unavailable" and use their existing fallbacks.
+    private func chatgptStatelessResponse(model: String, instructions: String, userContent: Any,
+                                          responseTools: [[String: Any]]? = nil,
+                                          forcedToolName: String? = nil,
+                                          timeout: TimeInterval = 45) async -> [String: Any]? {
+        guard let token = await ChatGPTOAuthService.shared.validAccessToken(),
+              let url = URL(string: ChatGPTOAuth.backendResponsesURL) else { return nil }
+        var body = ResponsesTranslator.requestBody(
+            model: model, instructions: instructions,
+            history: [["role": "user", "content": userContent]], tools: nil, stream: false)
+        if let responseTools {
+            body["tools"] = responseTools
+            if let forcedToolName {
+                body["tool_choice"] = ["type": "function", "name": forcedToolName]
+            }
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        ChatGPTAuth.apply(credential: token, accountID: ChatGPTOAuthService.shared.accountID, to: &request)
+        request.timeoutInterval = timeout
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    /// Structured variant (BW P4): forced function call → the tool's arguments object, with the
+    /// tolerant text-parse fallback (a model answering with prose JSON still yields a result).
+    private func chatgptStatelessStructured(model: String, instructions: String, userContent: Any,
+                                            toolName: String, toolDescription: String,
+                                            jsonSchema: [String: Any]) async -> [String: Any]? {
+        let tools: [[String: Any]] = [[
+            "type": "function", "name": toolName,
+            "description": toolDescription, "parameters": jsonSchema,
+        ]]
+        guard let json = await chatgptStatelessResponse(
+            model: model, instructions: instructions, userContent: userContent,
+            responseTools: tools, forcedToolName: toolName) else { return nil }
+        let parsed = ResponsesTranslator.parseOutput(json)
+        if let args = parsed.toolCalls.first(where: { $0.name == toolName })?.arguments, !args.isEmpty {
+            return args
+        }
+        return AssessmentJSON.object(fromText: parsed.text)
     }
 
     // MARK: - Streaming (SSE) — Chat tab live token delivery

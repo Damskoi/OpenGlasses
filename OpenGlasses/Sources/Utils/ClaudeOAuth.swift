@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 /// Pure core for the Anthropic "Sign in with Claude" OAuth flow (Plan-style deterministic core —
 /// no I/O, fully unit-testable). The network/persistence edge lives in `ClaudeOAuthService`.
@@ -31,32 +30,12 @@ enum ClaudeOAuth {
         credential.hasPrefix("sk-ant-oat")
     }
 
-    // MARK: - PKCE
+    // MARK: - PKCE (delegates to the shared `PKCE` enum — Plan BW extracted it)
 
-    /// Base64url (no padding) — the encoding PKCE uses for both verifier and challenge.
-    static func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    /// Derive a code verifier from random bytes (injectable so tests are deterministic).
-    static func verifier(from randomBytes: Data) -> String {
-        base64URL(randomBytes)
-    }
-
-    /// Generate a fresh random verifier (32 random bytes → 43-char base64url string).
-    static func makeVerifier() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return verifier(from: Data(bytes))
-    }
-
-    /// S256 code challenge for a verifier (RFC 7636).
-    static func challenge(for verifier: String) -> String {
-        base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
-    }
+    static func base64URL(_ data: Data) -> String { PKCE.base64URL(data) }
+    static func verifier(from randomBytes: Data) -> String { PKCE.verifier(from: randomBytes) }
+    static func makeVerifier() -> String { PKCE.makeVerifier() }
+    static func challenge(for verifier: String) -> String { PKCE.challenge(for: verifier) }
 
     // MARK: - Authorize URL
 
@@ -80,20 +59,9 @@ enum ClaudeOAuth {
     // MARK: - Pasted-code parsing
 
     /// The callback page shows the authorization code as `code#state`. Accept that, a bare
-    /// code, or a full callback URL the user pasted; trim whitespace either way.
+    /// code, or a full callback URL the user pasted (shared parser, Plan BW).
     static func parseAuthorizationInput(_ input: String) -> (code: String, state: String?)? {
-        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        // Full callback URL pasted: pull code/state from the query.
-        if text.hasPrefix("http"), let components = URLComponents(string: text) {
-            let code = components.queryItems?.first(where: { $0.name == "code" })?.value
-            let state = components.queryItems?.first(where: { $0.name == "state" })?.value
-            if let code, !code.isEmpty { return (code, state) }
-            if let fragment = components.fragment { text = fragment } else { return nil }
-        }
-        let parts = text.split(separator: "#", maxSplits: 1).map(String.init)
-        guard let code = parts.first, !code.isEmpty else { return nil }
-        return (code, parts.count > 1 ? parts[1] : nil)
+        OAuthCodeInput.parse(input)
     }
 
     // MARK: - Token requests

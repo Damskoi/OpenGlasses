@@ -71,7 +71,7 @@ final class UsageTracker: ObservableObject {
     /// it on its own async context (the non-Sendable JSON never crosses an actor hop).
     nonisolated static func parseUsage(provider: LLMProvider, json: [String: Any]) -> ParsedUsage? {
         switch provider {
-        case .anthropic:
+        case .anthropic, .chatgpt:   // the Responses backend uses the same input/output_tokens keys
             guard let u = json["usage"] as? [String: Any] else { return nil }
             let recognized = u["input_tokens"] != nil || u["output_tokens"] != nil
                 || u["cache_creation_input_tokens"] != nil || u["cache_read_input_tokens"] != nil
