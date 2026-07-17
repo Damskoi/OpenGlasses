@@ -83,27 +83,40 @@ enum HistoryHygiene {
         return out
     }
 
+    /// An image block in ANY of the three provider shapes the shared history can hold:
+    /// Anthropic (`type: image`), OpenAI-compatible (`type: image_url`), and Gemini
+    /// (`inlineData` inside a `parts` array). The prune runs for every provider now, so it
+    /// must recognise every shape or old photos silently keep re-uploading on that path.
+    private static func isImageBlock(_ block: [String: Any]) -> Bool {
+        if let type = block["type"] as? String, type == "image" || type == "image_url" { return true }
+        return block["inlineData"] != nil
+    }
+
     private static func messageHasImage(_ message: [String: Any]) -> Bool {
-        guard let blocks = message["content"] as? [[String: Any]] else { return false }
-        return blocks.contains { $0["type"] as? String == "image" }
+        let blocks = (message["content"] as? [[String: Any]]) ?? (message["parts"] as? [[String: Any]]) ?? []
+        return blocks.contains(where: isImageBlock)
     }
 
     private static func stripImages(from message: [String: Any]) -> [String: Any] {
-        guard let blocks = message["content"] as? [[String: Any]] else { return message }
+        let contentKey = message["content"] is [[String: Any]] ? "content"
+                       : message["parts"] is [[String: Any]] ? "parts" : nil
+        guard let key = contentKey, let blocks = message[key] as? [[String: Any]] else { return message }
         var newBlocks: [[String: Any]] = []
         var replacedAny = false
         for block in blocks {
-            if block["type"] as? String == "image" {
+            if isImageBlock(block) {
                 replacedAny = true
             } else {
                 newBlocks.append(block)
             }
         }
         if replacedAny {
-            newBlocks.append(["type": "text", "text": prunedImagePlaceholder])
+            // Gemini `parts` use `text` fields directly; content arrays use typed text blocks.
+            newBlocks.append(key == "parts" ? ["text": prunedImagePlaceholder]
+                                            : ["type": "text", "text": prunedImagePlaceholder])
         }
         var out = message
-        out["content"] = newBlocks
+        out[key] = newBlocks
         return out
     }
 

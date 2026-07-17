@@ -163,6 +163,7 @@ final class MCPClient: ObservableObject {
         servers.removeAll { $0.id == id }
         discoveredTools.removeAll { $0.serverId == id }
         Config.setMCPServers(servers)
+        HTTPTransport.resetSessions()
     }
 
     func updateServer(_ server: MCPServerConfig) {
@@ -179,6 +180,9 @@ final class MCPClient: ObservableObject {
             || old.transport != server.transport || old.enabled != server.enabled
         guard materialChange else { return }
         discoveredTools.removeAll { $0.serverId == server.id }
+        // The MCP session was minted under the old config — a rotated token or new URL must
+        // re-handshake, not reuse the stale mcp-session-id.
+        HTTPTransport.resetSessions()
         if server.enabled {
             Task { [weak self] in
                 guard let self else { return }

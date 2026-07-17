@@ -96,6 +96,46 @@ final class HistoryHygieneTests: XCTestCase {
         XCTAssertTrue(blocks?.contains { $0["type"] as? String == "image" } ?? false)
     }
 
+    /// The prune now runs for every provider, so it must recognise the OpenAI-compatible
+    /// `image_url` block shape — an unpruned photo history overflowed Gemini-via-OpenAI context.
+    func testPruneRecognisesOpenAIImageURLBlocks() {
+        func openAIImageMessage(_ text: String) -> [String: Any] {
+            ["role": "user", "content": [
+                ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,AAAA"]],
+                ["type": "text", "text": text],
+            ]]
+        }
+        let pruned = HistoryHygiene.pruneImages(
+            [openAIImageMessage("first"), openAIImageMessage("second")], keepLast: 1)
+        let firstBlocks = pruned[0]["content"] as? [[String: Any]]
+        XCTAssertFalse(firstBlocks?.contains { $0["type"] as? String == "image_url" } ?? true,
+                       "old OpenAI-format image should be pruned")
+        XCTAssertTrue(firstBlocks?.contains { ($0["text"] as? String) == HistoryHygiene.prunedImagePlaceholder } ?? false)
+        let secondBlocks = pruned[1]["content"] as? [[String: Any]]
+        XCTAssertTrue(secondBlocks?.contains { $0["type"] as? String == "image_url" } ?? false,
+                      "newest image must be kept")
+    }
+
+    /// Gemini native turns store images as `inlineData` inside a `parts` array.
+    func testPruneRecognisesGeminiInlineDataParts() {
+        func geminiImageMessage(_ text: String) -> [String: Any] {
+            ["role": "user", "parts": [
+                ["inlineData": ["mimeType": "image/jpeg", "data": "AAAA"]],
+                ["text": text],
+            ]]
+        }
+        let pruned = HistoryHygiene.pruneImages(
+            [geminiImageMessage("first"), geminiImageMessage("second")], keepLast: 1)
+        let firstParts = pruned[0]["parts"] as? [[String: Any]]
+        XCTAssertFalse(firstParts?.contains { $0["inlineData"] != nil } ?? true,
+                       "old Gemini inlineData should be pruned")
+        XCTAssertTrue(firstParts?.contains { ($0["text"] as? String) == HistoryHygiene.prunedImagePlaceholder } ?? false,
+                      "placeholder lands as a bare-text part, not a typed block")
+        let secondParts = pruned[1]["parts"] as? [[String: Any]]
+        XCTAssertTrue(secondParts?.contains { $0["inlineData"] != nil } ?? false,
+                      "newest image must be kept")
+    }
+
     // MARK: - Token estimation
 
     func testImageBlockCountsMoreThanTheFloor() {

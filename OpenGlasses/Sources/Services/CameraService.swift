@@ -353,13 +353,22 @@ class CameraService: ObservableObject {
             session.start()  // DAT 0.8.0: Stream.start() is synchronous
         }
 
-        // Wait for streaming state
+        // Wait for streaming state. During a cold start the stream bounces through .stopped
+        // (device-traced: ~15-18s of .stopped/.waitingForDevice churn before .streaming), so a
+        // transient .stopped is NOT terminal — nudge start() again a few times before giving up.
+        var restartNudges = 0
         let deadline = ContinuousClock.now + .seconds(timeout)
         while ContinuousClock.now < deadline {
             if session.state == .streaming { break }
             if session.state == .stopped {
-                NSLog("[Camera] Session stopped unexpectedly while waiting for streaming")
-                throw CameraError.streamNotReady
+                if restartNudges < 3 {
+                    restartNudges += 1
+                    NSLog("[Camera] Stream stopped while warming up — restart nudge %d/3", restartNudges)
+                    session.start()
+                } else {
+                    NSLog("[Camera] Session stopped unexpectedly while waiting for streaming")
+                    throw CameraError.streamNotReady
+                }
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
@@ -503,9 +512,10 @@ class CameraService: ObservableObject {
                 return
             }
 
-            // Timeout after 5 seconds — fall back to latest video frame
+            // Timeout after 8 seconds — fall back to latest video frame. (5s was too tight on
+            // a cold WiFi-transport capture; the photo often lands at 5-7s.)
             Task {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
                 if let cont = self.photoContinuation {
                     self.photoContinuation = nil
                     if let fallback = self.latestFrameAsJPEG() {
