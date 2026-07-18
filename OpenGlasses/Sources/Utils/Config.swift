@@ -2372,6 +2372,54 @@ struct Config {
         UserDefaults.standard.set(value, forKey: "frameDedupHeartbeatSeconds")
     }
 
+    // MARK: - Power Policy thresholds (Plan BV P1)
+    //
+    // Battery enter/exit percentages for the conserve/reserve postures. Code-only knobs (same
+    // posture as frameDedup* above) so the device drain-session pass tunes them without a build.
+    // Enter < exit gives the hysteresis band that stops the posture flapping at a boundary.
+    // Thermal thresholds stay at the `PowerPolicy.Thresholds` enum defaults (serious→conserve,
+    // critical→reserve) — the discrete bands don't hover the way a percentage does.
+
+    static var powerConserveBatteryEnterPercent: Int {
+        UserDefaults.standard.object(forKey: "powerConserveBatteryEnterPercent") as? Int ?? 30
+    }
+    static func setPowerConserveBatteryEnterPercent(_ value: Int) {
+        UserDefaults.standard.set(value, forKey: "powerConserveBatteryEnterPercent")
+    }
+
+    static var powerConserveBatteryExitPercent: Int {
+        UserDefaults.standard.object(forKey: "powerConserveBatteryExitPercent") as? Int ?? 35
+    }
+    static func setPowerConserveBatteryExitPercent(_ value: Int) {
+        UserDefaults.standard.set(value, forKey: "powerConserveBatteryExitPercent")
+    }
+
+    static var powerReserveBatteryEnterPercent: Int {
+        UserDefaults.standard.object(forKey: "powerReserveBatteryEnterPercent") as? Int ?? 15
+    }
+    static func setPowerReserveBatteryEnterPercent(_ value: Int) {
+        UserDefaults.standard.set(value, forKey: "powerReserveBatteryEnterPercent")
+    }
+
+    static var powerReserveBatteryExitPercent: Int {
+        UserDefaults.standard.object(forKey: "powerReserveBatteryExitPercent") as? Int ?? 20
+    }
+    static func setPowerReserveBatteryExitPercent(_ value: Int) {
+        UserDefaults.standard.set(value, forKey: "powerReserveBatteryExitPercent")
+    }
+
+    /// The tunable thresholds assembled for `PowerPolicy.decide`; thermal bands stay at defaults.
+    static var powerThresholds: PowerPolicy.Thresholds {
+        PowerPolicy.Thresholds(
+            conserveBatteryEnter: Double(powerConserveBatteryEnterPercent) / 100.0,
+            conserveBatteryExit: Double(powerConserveBatteryExitPercent) / 100.0,
+            reserveBatteryEnter: Double(powerReserveBatteryEnterPercent) / 100.0,
+            reserveBatteryExit: Double(powerReserveBatteryExitPercent) / 100.0,
+            conserveThermal: PowerPolicy.Thresholds.default.conserveThermal,
+            reserveThermal: PowerPolicy.Thresholds.default.reserveThermal
+        )
+    }
+
     // MARK: - Reading Companion detector tuning (Plan BT P3)
     //
     // Config-backed so the P3 device pass (curved paperbacks, e-reader glare) is data-only —
