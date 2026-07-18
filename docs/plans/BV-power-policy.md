@@ -1,6 +1,16 @@
 # Plan BV — Power Policy
 
-**Status: 📋 Planned (2026-07-16).** A battery- and thermal-aware power policy for all-day
+**Status: 🚧 P1 core shipped (2026-07-18); P2 adoption deferred.** The pure fusion + table
+are built and tested — `ThermalPressure` (normalises `ProcessInfo.ThermalState`; DAT
+`ThermalLevel` mapping lands in P2), `PowerState` (four optional signals + Low Power Mode),
+`PowerPosture` (normal/conserve/reserve + a shared consumer-flag contract), and `PowerPolicy`
+(worst-signal-wins fusion, battery **hysteresis** with differing enter/exit bands, one-line
+`explanation`), thresholds in `Config.powerThresholds`, with `PowerPolicyTests` (22 cases). P2
+— consumers reading `PowerPolicyService.shared.posture` (camera snapshot-first, live-mode
+frame intervals, smaller local-model tier under thermal load) — is deferred; needs the device
+drain/hot-day pass to tune thresholds.
+
+A battery- and thermal-aware power policy for all-day
 wear, built on one principle: **use the lowest-power combination of sensing, compute and
 networking capable of completing the request.** Today the app has no systematic power
 posture — `batteryLevel` is display-only, the only low-power-mode read is a tool string,
