@@ -451,7 +451,17 @@ class LLMService: ObservableObject {
     ///   concatenate with the final reply (BM P9).
     func sendMessage(_ text: String, locationContext: String? = nil, imageData: Data? = nil, memoryContext: String? = nil, agentContext: String? = nil, playbookContext: String? = nil, nowPlayingContext: String? = nil, shortcutsContext: String? = nil, promptSections: ConversationClassifier.PromptSections? = nil, onToken: ((String) -> Void)? = nil, onStreamReset: (() -> Void)? = nil) async throws -> String {
         isProcessing = true
-        defer { isProcessing = false }
+        defer {
+            isProcessing = false
+            // A "new topic" requested DURING this turn (the model called the new_topic tool)
+            // applies now that the turn is complete — clearing mid-loop would orphan the
+            // pending tool_result and 400 the next request.
+            if pendingHistoryClear {
+                pendingHistoryClear = false
+                clearHistory()
+                NSLog("[LLMService] History cleared (deferred new-topic request)")
+            }
+        }
 
         // Compress context window if conversation history has grown too large
         // Use LLM summarization in agentic mode, heuristic fallback otherwise
@@ -687,6 +697,20 @@ class LLMService: ObservableObject {
     }
 
     /// Clear conversation history (e.g. when starting fresh or switching providers)
+    /// Set when a "new topic" arrives while a turn is in flight; applied in `sendMessage`'s defer.
+    private var pendingHistoryClear = false
+
+    /// Clear the conversation history — immediately when idle, or after the in-flight turn
+    /// completes when the model itself requested it via the `new_topic` tool (a mid-loop wipe
+    /// would orphan the pending tool_result).
+    func requestHistoryClear() {
+        if isProcessing {
+            pendingHistoryClear = true
+        } else {
+            clearHistory()
+        }
+    }
+
     func clearHistory() {
         conversationHistory.removeAll()
     }

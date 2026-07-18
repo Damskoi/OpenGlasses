@@ -161,8 +161,21 @@ struct ConversationClassifier {
             return DirectToolCall(toolName: "calendar", arguments: ["action": action])
         }
 
+        // "New topic" — a bare conversation-reset command clears context without an LLM turn.
+        // Bare-query gated: "new topic" inside a longer sentence ("write about a new topic for
+        // my essay") must reach the LLM as content, not wipe the conversation.
+        if let matched = matchedPattern(text, patterns: newTopicPatterns), isBareQuery(text, matched: matched) {
+            return DirectToolCall(toolName: "new_topic", arguments: [:])
+        }
+
         return nil
     }
+
+    private let newTopicPatterns = [
+        "new topic", "new conversation", "start over", "start fresh", "start again",
+        "clear the conversation", "clear conversation", "clear our conversation",
+        "forget this conversation", "forget that", "reset the conversation", "fresh start"
+    ]
 
     /// Match an informational calendar question and pick the tool action for it, or nil.
     /// Three gates: names a calendar-ish noun, is NOT a creation command, and has an
@@ -219,7 +232,9 @@ struct ConversationClassifier {
         // Weather tier-0 ("what is the weather where I am", "what's the weather like
         // outside"). Additions only widen what counts as bare; anything with real content
         // words still reaches the LLM.
-        "what", "where", "am", "like", "outside", "here", "tomorrow", "for"
+        "what", "where", "am", "like", "outside", "here", "tomorrow", "for",
+        // New-topic tier-0 ("let's start a new topic", "can we start over", "okay new topic").
+        "let", "lets", "a", "we", "can", "okay", "ok", "just", "start"
     ]
 
     // MARK: - Tier 1: Prompt Section Detection

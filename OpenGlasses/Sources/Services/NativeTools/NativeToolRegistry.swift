@@ -23,6 +23,7 @@ final class NativeToolRegistry {
         register(weatherTool)
         register(dateTimeTool)
         register(CalculatorTool())
+        register(NewTopicTool())
         register(UnitConversionTool())
         register(TimerTool())
         register(SaveNoteTool())
