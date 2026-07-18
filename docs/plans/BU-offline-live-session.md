@@ -1,6 +1,14 @@
 # Plan BU — Offline Live Session
 
-**Status: 📋 Planned (2026-07-16).** A fully on-device live session mode: continuous voice
+**Status: 🚧 P1 core shipped (2026-07-18); P2 device-wiring deferred.** The pure headless
+core is built and tested — `LiveSessionTurnLoop` (state machine + barge-in + cancel/stop
+from every state), `FrameFreshnessPolicy` (ask-time one-frame-per-turn), and
+`LiveTurnAssembler` (persona + immutable grounding rule + budget-capped rolling window), with
+`OfflineLiveSessionTests` (24 cases). P2 — `OfflineLiveSessionService` stitching the speech
+stack, `CameraService.framePublisher`, `LocalLLMService` VLM, and `speakStreaming` behind a
+foreground guard + presence `.away` gate — is device-pending by design.
+
+A fully on-device live session mode: continuous voice
 Q&A grounded on the *latest camera frame* — on-device speech-to-text in, a local vision
 model answering, streamed on-device TTS out. The private tier of the live-mode family:
 Direct mode needs a turn per exchange, Gemini Live and OpenAI Realtime need cloud and a
