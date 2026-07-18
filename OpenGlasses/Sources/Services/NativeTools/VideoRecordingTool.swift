@@ -86,6 +86,10 @@ struct VideoRecordingTool: NativeTool {
                     response += " Live transcription is running — a text transcript will be saved alongside the video."
                 }
                 response += " Say 'stop recording' when you're done — there is no time limit."
+                // Low (but sufficient) disk: lead with the warning so it's actually heard.
+                if let warning = await MainActor.run(body: { recorder.lowStorageWarning }) {
+                    response = warning + " " + response
+                }
                 return response
             } catch {
                 return "Could not start recording: \(error.localizedDescription)"
