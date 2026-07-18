@@ -876,6 +876,20 @@ class AppState: ObservableObject, AppStateProtocol {
             }
         }
 
+        // Hands-free "new topic" — the new_topic tool posts this; clear the LLM's context
+        // (deferred-safe when a turn is in flight) and start a fresh persistence thread so the
+        // conversation history view also breaks here.
+        NotificationCenter.default.addObserver(forName: .ogNewTopicRequested, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.llmService.requestHistoryClear()
+                if Config.conversationPersistenceEnabled {
+                    self.conversationStore.startThread(mode: self.currentMode.rawValue, personaId: self.activePersona?.id)
+                }
+                NSLog("[AppState] New topic — conversation context cleared")
+            }
+        }
+
         // Wire camera frames for realtime sessions:
         // Direct push: CameraService streams frames to whichever session is active
         cameraService.onVideoFrame = { [weak self] image in
