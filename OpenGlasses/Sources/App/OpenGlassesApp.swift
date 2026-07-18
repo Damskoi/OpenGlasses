@@ -744,6 +744,14 @@ class AppState: ObservableObject, AppStateProtocol {
         memoryRewind.wakeWordService = wakeWordService
         videoRecorder.wakeWordService = wakeWordService
         videoRecorder.ambientCaptionService = ambientCaptions
+        // Stream-death auto-stop: announce it — the user can't tell from inside a pocket that
+        // the glasses died and the recording was ended and saved.
+        videoRecorder.onAutoStopped = { [weak self] message in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.speechService.speak(message)
+            }
+        }
         videoRecorder.hipaaService = hipaaService
         videoRecorder.meetingAssistant = meetingAssistant
         videoRecorder.llmClosure = { [weak self] prompt in

@@ -282,7 +282,7 @@ The agentic path is hardened against **prompt injection** — untrusted content 
 - **Voice-Activated Photo Capture** — "take a picture" or "what's this?"
 - **QR/Barcode Scanner** — "scan this code" (Vision framework, works offline)
 - **Live Camera Preview** — real-time view of glasses POV
-- **Video Recording** — MP4 with configurable bitrate
+- **Video Recording** — MP4 with configurable bitrate, glasses-mic audio muxed in, optional live transcription. **No recording time limit** — say "record a video" and it runs until you say "stop recording" (built for meetings and long sessions; the practical limits are glasses battery/thermals and phone storage, not the app). If storage is low it warns with the estimated minutes left, and if the glasses stop mid-recording (battery, thermal shutdown, out of range) it automatically stops, saves everything captured, and tells you.
 - **RTMP Broadcasting** — live stream to YouTube, Twitch, Kick
 - **WebRTC Browser Streaming** — shareable URL for peer-to-peer viewing
 - **Privacy Filter** — auto-blurs bystander faces

@@ -78,6 +78,70 @@ class VideoRecordingService: ObservableObject {
         return String(format: "%02d:%02d", mins, secs)
     }
 
+    // MARK: - Storage guard
+
+    /// Recording refuses to start below this free-disk floor (a dying write corrupts the MP4).
+    static let minimumFreeBytes: Int64 = 200 * 1_000_000
+    /// Below this, recording still starts but the caller should warn with the estimated headroom.
+    static let lowStorageBytes: Int64 = 2_000 * 1_000_000
+
+    enum StorageVerdict: Equatable {
+        case ok
+        /// Enough to record, but low — carries the estimated minutes of recording left.
+        case low(minutesRemaining: Int)
+        case insufficient
+    }
+
+    /// Pure storage decision (testable): free bytes + the actual encode bitrates → verdict.
+    static func storageVerdict(freeBytes: Int64, videoBitrate: Int, audioBitrate: Int = 64_000) -> StorageVerdict {
+        if freeBytes < minimumFreeBytes { return .insufficient }
+        guard freeBytes < lowStorageBytes else { return .ok }
+        let bytesPerSecond = max(Double(videoBitrate + audioBitrate) / 8, 1)
+        let minutes = Int(Double(freeBytes) / bytesPerSecond / 60)
+        return .low(minutesRemaining: minutes)
+    }
+
+    /// Free disk space usable for a recording (importantUsage — iOS may free purgeable space).
+    static func freeDiskBytes() -> Int64? {
+        let values = try? URL(fileURLWithPath: NSHomeDirectory())
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    /// Thrown when there isn't enough disk left to record safely.
+    struct InsufficientStorageError: LocalizedError {
+        var errorDescription: String? {
+            "Not enough storage to record — free up some space and try again."
+        }
+    }
+
+    /// Non-nil right after a recording starts with low (but sufficient) storage: a spoken-style
+    /// warning with the estimated minutes remaining. The caller announces it once.
+    private(set) var lowStorageWarning: String?
+
+    // MARK: - Stream-death auto-stop
+
+    /// Called when recording auto-stops because frames stopped arriving (glasses died: battery,
+    /// thermal shutdown, out of range). Carries a spoken-style message; the file up to the stall
+    /// is saved normally first.
+    var onAutoStopped: ((String) -> Void)?
+
+    /// Seconds without a frame (after at least one arrived) before recording auto-stops.
+    static let frameStallSeconds: TimeInterval = 15
+
+    /// Wall-clock of the most recent appended frame (nil until the first frame arrives).
+    /// Written from the background frame queue, read by the main-actor watchdog tick.
+    private nonisolated(unsafe) var lastFrameAt: Date?
+
+    /// Pure watchdog decision (testable): stop only when recording, at least one frame has ever
+    /// arrived, and the stream has been silent past the stall threshold. A recording that never
+    /// received a frame is left alone — the user may still be waiting for the stream to warm up.
+    static func shouldAutoStop(isRecording: Bool, lastFrameAt: Date?, now: Date,
+                               stallSeconds: TimeInterval = frameStallSeconds) -> Bool {
+        guard isRecording, let lastFrameAt else { return false }
+        return now.timeIntervalSince(lastFrameAt) >= stallSeconds
+    }
+
     /// Start recording video + audio.
     /// - Parameters:
     ///   - publisher: Video frame publisher from CameraService
@@ -89,6 +153,19 @@ class VideoRecordingService: ObservableObject {
         outputSize: CGSize? = nil
     ) throws {
         guard !isRecording else { return }
+
+        // Storage guard: refuse when a write-out would die mid-file; warn when it's just low.
+        lowStorageWarning = nil
+        if let free = Self.freeDiskBytes() {
+            switch Self.storageVerdict(freeBytes: free, videoBitrate: bitrate) {
+            case .insufficient:
+                throw InsufficientStorageError()
+            case .low(let minutes):
+                lowStorageWarning = "Heads up — storage is low. About \(minutes) minutes of recording space left."
+            case .ok:
+                break
+            }
+        }
 
         let tempDir = FileManager.default.temporaryDirectory
         let fileName = "OpenGlasses_\(Int(Date().timeIntervalSince1970)).mp4"
@@ -158,6 +235,7 @@ class VideoRecordingService: ObservableObject {
         self.poolHeight = 0
         self.recordingDuration = 0
         self.recordingStartDate = Date()
+        self.lastFrameAt = nil
         self.recordingTranscript = ""
         self.transcriptEntries = []
         self.isRecording = true
@@ -197,12 +275,29 @@ class VideoRecordingService: ObservableObject {
                 if self.autoTranscribe {
                     self.collectCaptions()
                 }
+                // Stream-death watchdog: if the glasses died (battery/thermal/range), stop and
+                // SAVE rather than idling forever on a stalled stream.
+                if Self.shouldAutoStop(isRecording: self.isRecording, lastFrameAt: self.lastFrameAt, now: Date()) {
+                    await self.autoStopForStalledStream()
+                }
             }
         }
 
         NSLog("[Recording] Started (video+audio) → %@ (%dx%d @ %d bps)",
               url.lastPathComponent, encodedWidth, encodedHeight, bitrate)
         hipaaService?.log(action: "RECORDING_STARTED", detail: "Video+audio recording started")
+    }
+
+    /// Stream-death auto-stop: finish and save the recording normally (everything captured up
+    /// to the stall is kept), then tell the caller so it can be announced.
+    private func autoStopForStalledStream() async {
+        let duration = formattedDuration
+        NSLog("[Recording] No frames for %.0fs — auto-stopping (glasses stream died)", Self.frameStallSeconds)
+        let url = await stopRecording()
+        let saved = url != nil
+        onAutoStopped?(saved
+            ? "The glasses stopped sending video, so I've ended the recording and saved the \(duration) captured so far."
+            : "The glasses stopped sending video and the recording could not be saved.")
     }
 
     /// Stop recording and return the URL of the finished .mp4.
@@ -419,6 +514,7 @@ class VideoRecordingService: ObservableObject {
     // MARK: - Frame Appending
 
     private nonisolated func appendFrame(_ image: UIImage) {
+        lastFrameAt = Date()   // feeds the stream-death watchdog
         guard let cgImage = image.cgImage else { return }
 
         let width = cgImage.width
