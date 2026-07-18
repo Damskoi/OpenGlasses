@@ -308,7 +308,22 @@ final class RealtimeAudioEngine {
     }
 
     private func playAudioOnQueue(data: Data) {
-        guard isCapturing, isPlayerNodeAttached, audioEngine.isRunning, !data.isEmpty else { return }
+        guard isCapturing, isPlayerNodeAttached, !data.isEmpty else { return }
+
+        // An AVAudioSession deactivation (sleep, another owner's session cycle) can leave
+        // the engine non-nil but silently dead: `isRunning == false` while the graph looks
+        // intact, and every scheduled buffer is swallowed without an error. Resurrect the
+        // engine before scheduling instead of dropping the response into the void.
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                NSLog("%@ Playback engine was dead — restarted before scheduling", config.logPrefix)
+            } catch {
+                NSLog("%@ Playback engine restart failed (%@) — dropping %d bytes",
+                      config.logPrefix, error.localizedDescription, data.count)
+                return
+            }
+        }
 
         guard let playerFormat = try? AudioFormatFactory.pcm(
             .pcmFormatFloat32,

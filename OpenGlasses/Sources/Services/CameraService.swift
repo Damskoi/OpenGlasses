@@ -168,6 +168,14 @@ class CameraService: ObservableObject {
     private var knownDeviceId: String?
     private var devicesListenerToken: Any?
 
+    /// True while `startStreaming()`'s continuous mode owns the stream (live voice modes
+    /// put the mic on the glasses concurrently) — drives the low-res contention floor in
+    /// `ensureSession`. Discrete photo sessions leave it false.
+    private var continuousStreamingIntent = false
+    /// Resolution tier the current stream was actually built at (post-policy), so
+    /// `startStreaming` can rebuild a photo-era low-res stream that would starve voice.
+    private var activeStreamResolution: String?
+
     /// Ensure the persistent stream session exists. Creates it on first call.
     private func ensureSession() async throws {
         guard streamSession == nil else { return }
@@ -234,8 +242,19 @@ class CameraService: ObservableObject {
             throw CameraError.streamNotReady
         }
 
+        // Continuous streaming in the live voice modes runs alongside glasses-mic audio;
+        // the policy floors "low" to "medium" there so video can't starve the voice link
+        // off the shared Bluetooth radio (see `StreamConfigPolicy`).
+        let effectiveResolution = StreamConfigPolicy.effectiveResolution(
+            requested: Config.cameraResolution,
+            concurrentGlassesVoice: continuousStreamingIntent
+        )
+        if effectiveResolution != Config.cameraResolution {
+            NSLog("[Camera] Resolution floored to %@ for streaming with glasses voice", effectiveResolution)
+            onDebugEvent?("Camera: low-res floored to medium while voice is on the glasses")
+        }
         let resolution: StreamingResolution = {
-            switch Config.cameraResolution {
+            switch effectiveResolution {
             case "low": return .low
             case "medium": return .medium
             default: return .high
@@ -252,9 +271,10 @@ class CameraService: ObservableObject {
             throw CameraError.streamNotReady
         }
         streamSession = stream
+        activeStreamResolution = effectiveResolution
         attachListeners(to: stream)
         // (session error watcher already attached above, before start)
-        NSLog("[Camera] Created persistent Stream (.\(Config.cameraResolution), \(fps)fps)")
+        NSLog("[Camera] Created persistent Stream (.\(effectiveResolution), \(fps)fps)")
     }
 
     /// BR P2: device-level errors (incl. `.datAppOnTheGlassesUpdateRequired`) arrive on the
@@ -424,6 +444,13 @@ class CameraService: ObservableObject {
     private(set) var lastCaptureSource: CaptureSource = .glasses
 
     /// Capture a photo from the glasses camera. Returns JPEG data.
+    ///
+    /// NOTE (device-reported, unverified here): `capturePhoto` also works on a stream that
+    /// was added but never `start()`ed, and capturing on a *streaming* stream has been
+    /// reported to race the frame flow and trip the glasses-side frame-stall watchdog.
+    /// Our start-then-capture path is field-traced and carries the frame fallback, so it
+    /// stays; if captures ever start stalling the stream, try the no-start discrete path
+    /// before reaching for bigger hammers.
     private func captureFromGlasses() async throws -> Data {
         isCaptureInProgress = true
         defer { isCaptureInProgress = false }
@@ -606,10 +633,26 @@ class CameraService: ObservableObject {
     func startStreaming() async throws {
         guard !isStreaming else { return }
         idleTeardownTask?.cancel()   // explicit streaming owns the session now
+        continuousStreamingIntent = true
 
-        try await ensurePermission()
-        try await ensureSession()
-        try await waitForStreaming()
+        // A stream left behind by the discrete photo path may sit at the user's "low"
+        // tier; continuous streaming with glasses-mic voice needs the contention floor
+        // (see `StreamConfigPolicy`), so rebuild it at the effective tier first.
+        if let active = activeStreamResolution,
+           StreamConfigPolicy.effectiveResolution(
+               requested: Config.cameraResolution,
+               concurrentGlassesVoice: true) != active {
+            await teardownStreamOnly()
+        }
+
+        do {
+            try await ensurePermission()
+            try await ensureSession()
+            try await waitForStreaming()
+        } catch {
+            continuousStreamingIntent = false
+            throw error
+        }
 
         isStreaming = true
         startStallDetection()
@@ -618,6 +661,7 @@ class CameraService: ObservableObject {
 
     /// Stop continuous video streaming. Session is kept alive for reuse.
     func stopStreaming() async {
+        continuousStreamingIntent = false
         guard isStreaming else { return }
         stopStallDetection()
         if let session = streamSession {
@@ -640,6 +684,15 @@ class CameraService: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5s
                 guard !Task.isCancelled, let self else { break }
                 guard self.isStreaming, !self.isRecoveringFromStall else { continue }
+
+                // Temple-tap pause is a system hold: no frames is expected, there is no
+                // app-callable resume, and tearing down collapses the channel the next
+                // tap would resume. Sit it out (and keep the clock fresh so recovery
+                // doesn't fire the instant the tap resumes the stream).
+                if !StreamRecoveryPolicy.shouldRecoverFromStall(state: self.streamSession?.state) {
+                    self.lastFrameTime = Date()
+                    continue
+                }
 
                 let elapsed = Date().timeIntervalSince(self.lastFrameTime)
                 if elapsed > 1.5 {
@@ -669,7 +722,7 @@ class CameraService: ObservableObject {
 
         switch action {
         case .rebuildStream:
-            teardownStreamOnly()
+            await teardownStreamOnly()
         case .resetSession:
             await resetSession()
         }
@@ -696,22 +749,43 @@ class CameraService: ObservableObject {
     /// BR P2: drop the Stream and its listeners but keep the DeviceSession alive — a failed
     /// stream must not strand a half-open session (`ensureSession` re-adds the stream on
     /// the retained session).
-    private func teardownStreamOnly() {
-        streamSession?.stop()
+    private func teardownStreamOnly() async {
+        if let stream = streamSession {
+            stream.stop()
+            await awaitStreamStopped(stream)
+        }
         stateListenerToken = nil
         videoFrameListenerToken = nil
         photoListenerToken = nil
         errorListenerToken = nil
         streamSession = nil
+        activeStreamResolution = nil
         NSLog("[Camera] Stream torn down (session retained)")
+    }
+
+    /// Bounded wait for a stopped stream to actually reach `.stopped`. The camera
+    /// capability is process-wide and is freed when the stream finishes stopping — not
+    /// when the session is torn down — so arming a replacement stream before then throws
+    /// `capabilityAlreadyActive`. `stop()` is synchronous but the state transition isn't.
+    private func awaitStreamStopped(_ stream: MWDATCamera.Stream, timeout: Duration = .seconds(2)) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if stream.state == .stopped { return }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        NSLog("[Camera] Stream did not reach .stopped within %.0fs — proceeding",
+              Double(timeout.components.seconds))
     }
 
     /// Reset the session completely (for error recovery).
     private func resetSession() async {
         sessionErrorTask?.cancel()
         sessionErrorTask = nil
-        if let session = streamSession {
-            session.stop()
+        if let stream = streamSession {
+            stream.stop()
+            // Wait for the capability to actually free (see `awaitStreamStopped`) so the
+            // retry loop's next `ensureSession` doesn't collide with the dying stream.
+            await awaitStreamStopped(stream)
         }
         deviceSession?.stop()
         stateListenerToken = nil
@@ -719,12 +793,12 @@ class CameraService: ObservableObject {
         photoListenerToken = nil
         errorListenerToken = nil
         streamSession = nil
+        activeStreamResolution = nil
         deviceSession = nil
         // A torn-down session's frames must not survive to serve as "photos" for the next
         // capture — the staleness gate is belt, this is braces.
         latestFrame = nil
         lastFrameTime = .distantPast
-        latestFrame = nil
         NSLog("[Camera] Session reset")
     }
 
