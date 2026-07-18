@@ -59,6 +59,33 @@ final class ConversationClassifierTests: XCTestCase {
         }
     }
 
+    // MARK: - New topic (hands-free context clear)
+
+    func testNewTopicCommandsMatchDirectly() {
+        for query in ["new topic",
+                      "let's start a new topic",
+                      "start over",
+                      "can we start fresh",
+                      "clear the conversation",
+                      "okay new conversation",
+                      "forget this conversation"] {
+            XCTAssertEqual(classifier.classify(query).directToolCall?.toolName, "new_topic",
+                           "'\(query)' should directly clear context")
+        }
+    }
+
+    /// "New topic" as CONTENT (not a command) must reach the LLM — a substring match here
+    /// would wipe the user's conversation mid-thought.
+    func testNewTopicInsideContentDoesNotMatch() {
+        for query in ["suggest a new topic for my essay",
+                      "write about a new topic in quantum computing",
+                      "when we start over in january what changes",
+                      "help me start over with this recipe from step three"] {
+            XCTAssertNil(classifier.classify(query).directToolCall,
+                         "'\(query)' is content, not a reset command")
+        }
+    }
+
     /// Creation and modification must still reach the LLM — they need title/time extraction.
     func testCalendarMutationsDoNotMatchDirectly() {
         for query in ["add a meeting to my calendar tomorrow at 3pm",
