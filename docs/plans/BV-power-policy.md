@@ -1,14 +1,20 @@
 # Plan BV — Power Policy
 
-**Status: 🚧 P1 core shipped (2026-07-18); P2 adoption deferred.** The pure fusion + table
-are built and tested — `ThermalPressure` (normalises `ProcessInfo.ThermalState`; DAT
-`ThermalLevel` mapping lands in P2), `PowerState` (four optional signals + Low Power Mode),
-`PowerPosture` (normal/conserve/reserve + a shared consumer-flag contract), and `PowerPolicy`
-(worst-signal-wins fusion, battery **hysteresis** with differing enter/exit bands, one-line
-`explanation`), thresholds in `Config.powerThresholds`, with `PowerPolicyTests` (22 cases). P2
-— consumers reading `PowerPolicyService.shared.posture` (camera snapshot-first, live-mode
-frame intervals, smaller local-model tier under thermal load) — is deferred; needs the device
-drain/hot-day pass to tune thresholds.
+**Status: 🚧 P1 + P2 core shipped (2026-07-18); device tuning + remaining consumers deferred.**
+P1 pure fusion + table: `ThermalPressure`, `PowerState` (four optional signals + Low Power
+Mode), `PowerPosture` (normal/conserve/reserve + shared consumer-flag contract), `PowerPolicy`
+(worst-signal-wins, battery **hysteresis** with differing enter/exit bands, one-line
+`explanation`), `Config.powerThresholds`. P2 wiring: `PowerPolicyService.shared` (mirrors
+`PresenceMonitor` — injected signal seams, holds `previous` for hysteresis, publishes
+`posture`+`explanation`), the DAT `ThermalLevel → ThermalPressure` mapping, AppState wiring of
+the real phone signals (battery/thermals/Low Power Mode) + glasses battery, and two consumers:
+live-mode `FrameThrottler` interval stretch (Gemini Live + OpenAI Realtime) and `device_info`
+posture surfacing. 30 tests (`PowerPolicyTests` + `PowerPolicyServiceTests`).
+
+**Deferred:** glasses thermal (needs the DAT `deviceStateStream` observed — device-pending),
+the deeper consumers (camera snapshot-first escalation + idle stream teardown, smaller
+local-model tier, reading-companion checkpoint), and the device drain/hot-day pass to tune
+thresholds.
 
 A battery- and thermal-aware power policy for all-day
 wear, built on one principle: **use the lowest-power combination of sensing, compute and

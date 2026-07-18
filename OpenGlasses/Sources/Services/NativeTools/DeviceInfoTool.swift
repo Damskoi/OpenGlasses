@@ -42,6 +42,13 @@ struct DeviceInfoTool: NativeTool {
             info.append("Low Power Mode is ON")
         }
 
+        // Power posture (Plan BV): the app's current battery/thermal-aware posture, when it's
+        // doing anything (a one-line reason, e.g. "conserving — glasses battery 18%"). Silent in
+        // the normal posture so device_info stays terse when there's nothing to economise.
+        if let posture = await MainActor.run(body: { PowerPolicyService.shared.explanation }) {
+            info.append("Power posture: \(posture)")
+        }
+
         // Storage
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let freeSpace = attrs[.systemFreeSize] as? Int64 {

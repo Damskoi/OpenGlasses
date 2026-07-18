@@ -8,10 +8,12 @@ final class PowerPolicyTests: XCTestCase {
     // MARK: - ThermalPressure
 
     func testThermalPressureMapsProcessInfoState() {
-        XCTAssertEqual(ThermalPressure(.nominal), .nominal)
-        XCTAssertEqual(ThermalPressure(.fair), .fair)
-        XCTAssertEqual(ThermalPressure(.serious), .serious)
-        XCTAssertEqual(ThermalPressure(.critical), .critical)
+        // Qualify the state type: `ThermalPressure` also has a DAT `ThermalLevel` initializer whose
+        // enum shares case names (`.critical`), so a bare leading-dot is ambiguous.
+        XCTAssertEqual(ThermalPressure(ProcessInfo.ThermalState.nominal), .nominal)
+        XCTAssertEqual(ThermalPressure(ProcessInfo.ThermalState.fair), .fair)
+        XCTAssertEqual(ThermalPressure(ProcessInfo.ThermalState.serious), .serious)
+        XCTAssertEqual(ThermalPressure(ProcessInfo.ThermalState.critical), .critical)
     }
 
     func testThermalPressureIsOrdered() {

@@ -504,6 +504,9 @@ class AppState: ObservableObject, AppStateProtocol {
     private var lastInteractionAt = Date()
     private var isForegroundActive = true
     private var presenceTimer: Timer?
+    /// Drives periodic power-posture re-evaluation (Plan BV P2); also nudged on battery/thermal/
+    /// power-state notifications.
+    private var powerTimer: Timer?
     let faceRecognition = FaceRecognitionService()
     let memoryRewind = MemoryRewindService()
     let privacyFilter = PrivacyFilterService()
@@ -992,6 +995,9 @@ class AppState: ObservableObject, AppStateProtocol {
 
         // Wire the presence-aware throttle (Plan W) into the loops + signal sources.
         configurePresence()
+
+        // Wire the battery/thermal power posture (Plan BV) to the device signals.
+        configurePower()
 
         // Remote Agent Harness (Plan N): build the harness registry (OpenClaw + Custom URL) and
         // narrate via TTS. Gated at the tool layer by Config.agentModeEnabled.
@@ -2336,6 +2342,59 @@ class AppState: ObservableObject, AppStateProtocol {
         }
         presenceMonitor.update()
     }
+
+    // MARK: - Power Policy (Plan BV P2)
+
+    /// Wire `PowerPolicyService.shared`'s signal sources to the live device signals and drive its
+    /// re-evaluation. Phone signals are real (battery / thermals / Low Power Mode); glasses battery
+    /// rides `GlassesConnectionService` (nil until firmware reports it) and glasses thermal is left
+    /// absent until the DAT device-state stream is observed — a phone-only posture, which the plan
+    /// requires to stand on its own. Presence decides *whether* a loop runs; this decides *how
+    /// expensively* — deliberately independent services.
+    private func configurePower() {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let power = PowerPolicyService.shared
+
+        power.phoneBatteryFraction = {
+            let level = UIDevice.current.batteryLevel   // -1 when unknown/monitoring off
+            return level >= 0 ? Double(level) : nil
+        }
+        power.phoneCharging = {
+            let state = UIDevice.current.batteryState
+            return state == .charging || state == .full
+        }
+        power.phoneThermal = { ThermalPressure(ProcessInfo.processInfo.thermalState) }
+        power.glassesBatteryPercent = { [weak self] in self?.glassesService.batteryLevel }
+        power.lowPowerMode = { ProcessInfo.processInfo.isLowPowerModeEnabled }
+
+        // Live spenders read the posture in their own terms. Live-mode frame throttlers stretch
+        // their interval; more consumers (camera snapshot-first, local-model tier) adopt it as
+        // their device passes land.
+        let postureToken = power.$posture.sink { posture in
+            NSLog("[Power] posture → %@", posture.label)
+        }
+        cancellables.append(postureToken)
+
+        // Re-evaluate on the OS signals that move the posture, plus a slow periodic backstop for
+        // the battery percentage (which has no fine-grained notification).
+        let center = NotificationCenter.default
+        for name in [UIDevice.batteryLevelDidChangeNotification,
+                     UIDevice.batteryStateDidChangeNotification,
+                     ProcessInfo.thermalStateDidChangeNotification,
+                     Notification.Name.NSProcessInfoPowerStateDidChange] {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.powerPolicy.update() }
+            }
+            cancellables.append(token)
+        }
+        powerTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.powerPolicy.update() }
+        }
+        power.update()
+    }
+
+    /// Convenience alias for the shared power service (mirrors `presenceMonitor` as a stored ref).
+    var powerPolicy: PowerPolicyService { PowerPolicyService.shared }
 
     // MARK: - Remote Agent Harness (Plan N)
 
