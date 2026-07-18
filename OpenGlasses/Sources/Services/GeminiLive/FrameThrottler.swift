@@ -23,12 +23,23 @@ class FrameThrottler {
     private let interval: TimeInterval
     private var isPaused: Bool = false
 
+    /// Power-posture stretch on the interval (Plan BV P2): `1.0` = full rate, higher = fewer frames
+    /// under `conserve`/`reserve`. Defaults to `1.0` so the throttle is byte-for-byte unchanged; the
+    /// session manager updates it from `PowerPolicyService`'s posture on the main actor (the same
+    /// actor `submit` runs on), so no cross-thread read is needed.
+    var powerIntervalMultiplier: Double = 1.0
+
     /// Content gate; non-nil only when `Config.frameDedupEnabled` was set at init.
     private var frameGate: FrameGate?
 
+    /// Injected clock, so the interval/power-multiplier gate is deterministic under test. The live
+    /// app leaves the default `Date()`.
+    private let now: () -> Date
+
     /// - Parameter interval: Minimum seconds between forwarded frames (default: from Config).
-    init(interval: TimeInterval = Config.geminiLiveVideoFrameInterval) {
+    init(interval: TimeInterval = Config.geminiLiveVideoFrameInterval, now: @escaping () -> Date = { Date() }) {
         self.interval = interval
+        self.now = now
         if Config.frameDedupEnabled {
             frameGate = FrameGate(
                 hammingThreshold: Config.frameDedupHammingThreshold,
@@ -59,8 +70,9 @@ class FrameThrottler {
     func submit(_ image: UIImage) {
         receivedCount += 1
         guard !isPaused else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastFrameTime) >= interval else { return }
+        let now = self.now()
+        let effectiveInterval = interval * max(1.0, powerIntervalMultiplier)
+        guard now.timeIntervalSince(lastFrameTime) >= effectiveInterval else { return }
 
         // Content gate runs after the time gate. dhash failure → fail open (send).
         var isKeyframe = false

@@ -55,6 +55,17 @@ enum PowerPosture: Int, Comparable, CaseIterable, Equatable {
     /// A continuous stream (or live-session start) needs explicit user confirmation first.
     var requiresConfirmationBeforeStream: Bool { self == .reserve }
 
+    /// Multiplier on a live-mode frame-forwarding interval — the posture's lever on the biggest
+    /// continuous spender. `1.0` = full rate; higher = fewer frames. Mirrors the shape of Plan W's
+    /// `ThrottleDecision.intervalMultiplier`, applied to frame cadence rather than loop cadence.
+    var frameIntervalMultiplier: Double {
+        switch self {
+        case .normal:   return 1.0
+        case .conserve: return 2.0
+        case .reserve:  return 4.0
+        }
+    }
+
     var label: String {
         switch self {
         case .normal:   return "normal"

@@ -92,6 +92,9 @@ class GeminiLiveSessionManager: ObservableObject {
             NSLog("[Session] submitVideoFrame #%d forwarded to throttler (%dx%d)",
                   submittedFrameCount, Int(image.size.width), Int(image.size.height))
         }
+        // Stretch the frame interval under battery/thermal pressure (Plan BV P2). Same-actor read,
+        // refreshed per submitted frame so a posture change takes effect immediately.
+        frameThrottler.powerIntervalMultiplier = PowerPolicyService.shared.posture.frameIntervalMultiplier
         frameThrottler.submit(image)
     }
 

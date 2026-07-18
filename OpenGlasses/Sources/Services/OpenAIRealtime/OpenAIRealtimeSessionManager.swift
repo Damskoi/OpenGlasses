@@ -58,6 +58,8 @@ class OpenAIRealtimeSessionManager: ObservableObject {
             NSLog("[OpenAI Session] First camera frame — streaming confirmed")
         }
         submittedFrameCount += 1
+        // Stretch the frame interval under battery/thermal pressure (Plan BV P2); same-actor read.
+        frameThrottler.powerIntervalMultiplier = PowerPolicyService.shared.posture.frameIntervalMultiplier
         frameThrottler.submit(image)
     }
 
