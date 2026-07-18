@@ -318,7 +318,17 @@ class GeminiLiveService: ObservableObject {
     private func sendSetupMessage() {
         var toolsArray: [[String: Any]] = []
         if !toolDeclarations.isEmpty {
-            toolsArray = [["functionDeclarations": toolDeclarations]]
+            // Flag-gated: NON_BLOCKING lets the model keep the conversation going while a
+            // tool runs; the router then acks slow calls and defers results WHEN_IDLE
+            // (`ToolCallRouter.toolResponse(phase:)`). Off by default — shape change.
+            let declarations = Config.geminiNonBlockingToolsEnabled
+                ? toolDeclarations.map { decl -> [String: Any] in
+                    var d = decl
+                    d["behavior"] = "NON_BLOCKING"
+                    return d
+                }
+                : toolDeclarations
+            toolsArray = [["functionDeclarations": declarations]]
         }
 
         let setup: [String: Any] = [

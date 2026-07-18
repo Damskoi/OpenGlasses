@@ -469,6 +469,12 @@ final class GlassesDisplayService: ObservableObject {
 
     private func teardownDisplay() async {
         if let display {
+            // Blank the waveguide BEFORE stopping, and give the clear a beat to land —
+            // stopping with content still up can surface the system home screen on the
+            // lens instead of going dark (device-traced ordering; iOS DAT has no
+            // `removeDisplay`, so clear → settle → stop is the whole discipline).
+            try? await display.clearDisplay()
+            try? await Task.sleep(nanoseconds: 200_000_000)
             display.stop()  // DAT 0.8.0: Display.stop() is synchronous
         }
         display = nil

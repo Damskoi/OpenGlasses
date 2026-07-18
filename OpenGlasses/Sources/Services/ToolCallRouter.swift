@@ -8,6 +8,15 @@ class ToolCallRouter {
     var nativeToolRouter: NativeToolRouter?
     private var inFlightTasks: [String: Task<Void, Never>] = [:]
 
+    /// Two-phase response support (`Config.geminiNonBlockingToolsEnabled`): calls still
+    /// running at `ackDelay` get an immediate ack (`willContinue` + SILENT scheduling) so
+    /// the model's open transaction closes fast; their final result is then delivered
+    /// WHEN_IDLE so the announcement never barges into the user. Fast calls keep the
+    /// plain single-response shape.
+    private var ackTimers: [String: Task<Void, Never>] = [:]
+    private var ackedCallIds: Set<String> = []
+    static let ackDelay: Duration = .seconds(1)
+
     /// Plan BR P1: per-session circuit breaker — bounds runaway tool loops. The session
     /// manager resets its user-turn window and reads `suspendedToolNames` when re-declaring
     /// tools on reconnect.
@@ -47,6 +56,19 @@ class ToolCallRouter {
 
         // Pause camera/audio streaming during tool execution to prevent instability
         onToolExecutionStarted?()
+
+        if Config.geminiNonBlockingToolsEnabled {
+            ackTimers[callId] = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: Self.ackDelay)
+                guard let self, !Task.isCancelled, self.inFlightTasks[callId] != nil else { return }
+                self.ackedCallIds.insert(callId)
+                NSLog("[ToolCall] %@ (id: %@) still running — sending non-blocking ack", callName, callId)
+                sendResponse(Self.toolResponse(
+                    callId: callId, name: callName,
+                    payload: ["result": "Still working — the result will follow."],
+                    phase: .ack))
+            }
+        }
 
         let argsKey = ToolCallBreaker.argsKey(call.args)
         let task = Task { @MainActor in
@@ -89,6 +111,7 @@ class ToolCallRouter {
             sendResponse(response)
 
             self.inFlightTasks.removeValue(forKey: callId)
+            self.ackTimers.removeValue(forKey: callId)?.cancel()
         }
 
         inFlightTasks[callId] = task
@@ -101,6 +124,8 @@ class ToolCallRouter {
                 task.cancel()
                 inFlightTasks.removeValue(forKey: id)
             }
+            ackTimers.removeValue(forKey: id)?.cancel()
+            ackedCallIds.remove(id)
         }
         bridge.lastToolCallStatus = .cancelled(ids.first ?? "unknown")
     }
@@ -111,6 +136,9 @@ class ToolCallRouter {
             task.cancel()
         }
         inFlightTasks.removeAll()
+        for (_, timer) in ackTimers { timer.cancel() }
+        ackTimers.removeAll()
+        ackedCallIds.removeAll()
     }
 
     // MARK: - Private
@@ -133,15 +161,50 @@ class ToolCallRouter {
         case .failure(let error):
             responseValue = ["error": error]
         }
+        let phase: ResponsePhase = ackedCallIds.remove(callId) != nil ? .finalAfterAck : .direct
+        return Self.toolResponse(callId: callId, name: name, payload: responseValue, phase: phase)
+    }
+
+    // MARK: - Response shape (pure, testable)
+
+    /// Which leg of the (possibly two-phase) exchange a response is.
+    enum ResponsePhase {
+        /// The only response for a call that finished fast — plain shape, model handles
+        /// delivery normally. Also used whenever the non-blocking flag is off.
+        case direct
+        /// Early ack for a still-running NON_BLOCKING call: `willContinue` keeps the call
+        /// open, SILENT scheduling stops the model narrating the ack.
+        case ack
+        /// The real result after an ack: WHEN_IDLE scheduling so the announcement waits
+        /// for the user's turn to finish instead of interrupting.
+        case finalAfterAck
+    }
+
+    /// Build the wire shape for one function response. Static + value-in/value-out so
+    /// tests can pin the exact payload per phase.
+    nonisolated static func toolResponse(
+        callId: String,
+        name: String,
+        payload: [String: Any],
+        phase: ResponsePhase
+    ) -> [String: Any] {
+        var functionResponse: [String: Any] = [
+            "id": callId,
+            "name": name,
+            "response": payload
+        ]
+        switch phase {
+        case .direct:
+            break
+        case .ack:
+            functionResponse["willContinue"] = true
+            functionResponse["scheduling"] = "SILENT"
+        case .finalAfterAck:
+            functionResponse["scheduling"] = "WHEN_IDLE"
+        }
         return [
             "toolResponse": [
-                "functionResponses": [
-                    [
-                        "id": callId,
-                        "name": name,
-                        "response": responseValue
-                    ]
-                ]
+                "functionResponses": [functionResponse]
             ]
         ]
     }

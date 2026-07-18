@@ -1711,6 +1711,19 @@ struct Config {
         !geminiLiveAPIKey.isEmpty
     }
 
+    /// Two-phase tool responses for Gemini Live: declare functions NON_BLOCKING, ack a
+    /// slow call fast (`willContinue` + SILENT) so the model's open transaction closes,
+    /// then deliver the real result WHEN_IDLE so it never barges into the user's turn.
+    /// Default OFF until validated against the live endpoint on device — the setup and
+    /// response payload shapes change when enabled.
+    static var geminiNonBlockingToolsEnabled: Bool {
+        UserDefaults.standard.object(forKey: "geminiNonBlockingToolsEnabled") as? Bool ?? false
+    }
+
+    static func setGeminiNonBlockingToolsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "geminiNonBlockingToolsEnabled")
+    }
+
     // MARK: - OpenAI Realtime Configuration
 
     /// Find the best OpenAI model config for Realtime mode.

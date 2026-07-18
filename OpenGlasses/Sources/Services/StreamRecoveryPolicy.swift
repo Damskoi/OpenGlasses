@@ -1,5 +1,6 @@
 import Foundation
 import MWDATCore
+import MWDATCamera
 
 /// Plan BR P2 — tiered camera-stream recovery + DAT compatibility messaging (pure).
 ///
@@ -20,6 +21,30 @@ enum StreamRecoveryPolicy {
     /// Consecutive failed recoveries (0 on the first attempt after healthy streaming).
     static func action(consecutiveFailures: Int) -> Action {
         consecutiveFailures < 2 ? .rebuildStream : .resetSession
+    }
+
+    /// Whether a frame-flow stall should trigger recovery at all, given the stream's
+    /// current state. `.paused` is the temple-tap system hold: frames stopping is the
+    /// EXPECTED behavior, there is no app-callable resume, and tearing the stream down
+    /// collapses the media channel the tap would otherwise resume. Recovery must wait
+    /// it out, not "fix" it.
+    static func shouldRecoverFromStall(state: StreamState?) -> Bool {
+        state != .paused
+    }
+}
+
+/// Chooses the effective stream configuration for a capture session (pure).
+///
+/// Device-traced: at low resolution the video stream can ride the *Bluetooth* radio
+/// instead of WiFi, starving the concurrent HFP/LE voice link — the glasses mic goes
+/// silent while frames keep flowing. Medium and above keep video on the WiFi transport.
+/// So when continuous streaming will run alongside glasses-mic audio (live voice modes),
+/// the configured "low" tier is floored to "medium"; discrete photo sessions keep the
+/// user's setting untouched.
+enum StreamConfigPolicy {
+    static func effectiveResolution(requested: String, concurrentGlassesVoice: Bool) -> String {
+        if concurrentGlassesVoice && requested == "low" { return "medium" }
+        return requested
     }
 }
 
