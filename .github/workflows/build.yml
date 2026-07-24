@@ -16,11 +16,14 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: List schemes
+        run: xcodebuild -list
+
       - name: Build Archive
         run: |
           xcodebuild archive \
-            -scheme OpenGlasses \
-            -sdk iphoneos \
+            -scheme OpenGlasses-Package \
+            -destination "generic/platform=iOS" \
             -archivePath build/OpenGlasses.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
@@ -28,7 +31,7 @@ jobs:
       - name: Package Payload to IPA
         run: |
           mkdir -p Payload
-          cp -r build/OpenGlasses.xcarchive/Products/Applications/*.app Payload/
+          cp -r build/OpenGlasses.xcarchive/Products/Applications/*.app Payload/ 2>/dev/null || cp -r build/OpenGlasses.xcarchive/Products/Library/Frameworks/*.app Payload/ 2>/dev/null || cp -r build/OpenGlasses.xcarchive/Products/usr/local/lib/*.app Payload/ 2>/dev/null
           zip -r OpenGlasses.ipa Payload
 
       - name: Upload IPA Artifact
