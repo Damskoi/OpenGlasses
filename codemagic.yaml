@@ -4,23 +4,26 @@ workflows:
     instance_type: mac_mini_m1
     max_build_duration: 30
     scripts:
-      - name: Install Tools, Generate Project & Fetch Dependencies
+      - name: Install Tools & Generate Project
         script: |
           brew install xcodegen
           xcodegen generate
-          xcodebuild -resolvePackageDependencies -scheme OpenGlasses
-      - name: Build and Package App
+          xcodebuild -resolvePackageDependencies -scheme OpenGlasses -skipPackagePluginValidation
+      - name: Build App
         script: |
           xcodebuild build \
             -scheme OpenGlasses \
             -sdk iphonesimulator \
             -configuration Release \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            -skipPackagePluginValidation
+      - name: Package IPA
+        script: |
+          APP_PATH=$(find $HOME/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+          echo "App trouvée à : $APP_PATH"
           
-          # Empaquetage en fichier .ipa pour Sideloadly
-          cd $HOME/Library/Developer/Xcode/DerivedData/OpenGlasses*/Build/Products/Release-iphonesimulator
           mkdir -p Payload
-          cp -r *.app Payload/
+          cp -r "$APP_PATH" Payload/
           zip -r OpenGlasses.ipa Payload
     artifacts:
-      - $HOME/Library/Developer/Xcode/DerivedData/OpenGlasses*/Build/Products/Release-iphonesimulator/OpenGlasses.ipa
+      - "*.ipa"
