@@ -4,9 +4,17 @@ workflows:
     instance_type: mac_mini_m1
     max_build_duration: 30
     scripts:
-      - name: Build iOS App
+      - name: Install Tools and Build App
         script: |
-          xcodebuild build -scheme OpenGlasses -sdk iphoneos
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild build \
+            -scheme OpenGlasses \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
     artifacts:
       - build/ios/ipa/*.ipa
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/Products/**/*.app
