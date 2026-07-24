@@ -11,7 +11,7 @@ workflows:
           xcodebuild -resolvePackageDependencies -scheme OpenGlasses -skipPackagePluginValidation
       - name: Build App
         script: |
-          xcodebuild build \
+          - xcodebuild build \
         -workspace OpenGlasses.xcworkspace \
         -scheme OpenGlasses \
         -configuration Release \
