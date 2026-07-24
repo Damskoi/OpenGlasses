@@ -12,11 +12,13 @@ workflows:
       - name: Build App
         script: |
           xcodebuild build \
-            -scheme OpenGlasses \
-            -sdk iphonesimulator \
-            -configuration Release \
-            CODE_SIGNING_ALLOWED=NO \
-            -skipPackagePluginValidation
+        -workspace OpenGlasses.xcworkspace \
+        -scheme OpenGlasses \
+        -configuration Release \
+        -sdk iphonesimulator \
+        CODE_SIGNING_ALLOWED=NO \
+        -skipPackagePluginValidation \
+        -skipMacroValidation
       - name: Package IPA
         script: |
           APP_PATH=$(find $HOME/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
