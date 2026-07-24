@@ -12,7 +12,6 @@ workflows:
       - name: Build App
         script: |
           xcodebuild build \
-          -workspace OpenGlasses.xcworkspace \
           -scheme OpenGlasses \
           -configuration Release \
           -sdk iphonesimulator \
