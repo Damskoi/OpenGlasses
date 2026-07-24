@@ -18,8 +18,9 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: List schemes
-        run: xcodebuild -list
+      - name: Resolve Package Dependencies
+        run: |
+          swift package resolve
 
       - name: Build Archive
         run: |
