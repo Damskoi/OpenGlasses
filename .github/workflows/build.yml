@@ -22,7 +22,6 @@ jobs:
             -scheme OpenGlasses \
             -sdk iphoneos \
             -archivePath build/OpenGlasses.xcarchive \
-            -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
