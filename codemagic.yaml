@@ -1,30 +1,29 @@
 workflows:
-  ios-workflow:
-    name: Build OpenGlasses iOS
+  ios-build-unsigned:
+    name: Build OpenGlasses IPA
     instance_type: mac_mini_m1
     max_build_duration: 30
     scripts:
-      - name: Install Tools & Generate Project
+      - name: Install XcodeGen & Generate Project
         script: |
           brew install xcodegen
-          xcodegen generate
-          xcodebuild -resolvePackageDependencies -scheme OpenGlasses -skipPackagePluginValidation
-      - name: Build App
+          chmod +x ./Scripts/generate-xcodeproj.sh
+          ./Scripts/generate-xcodeproj.sh
+      - name: Build iOS App (Unsigned)
         script: |
           xcodebuild build \
-          -scheme OpenGlasses \
-          -configuration Release \
-          -sdk iphonesimulator \
-          CODE_SIGNING_ALLOWED=NO \
-          -skipPackagePluginValidation \
-          -skipMacroValidation
-      - name: Package IPA
+            -project OpenGlasses.xcodeproj \
+            -scheme OpenGlasses \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            BUILD_DIR=build
+      - name: Package into IPA
         script: |
-          APP_PATH=$(find $HOME/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
-          echo "App trouvée à : $APP_PATH"
-          
-          mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -r OpenGlasses.ipa Payload
+          mkdir -p build/Payload
+          cp -r build/Release-iphoneos/*.app build/Payload/
+          cd build && zip -r OpenGlasses.ipa Payload
     artifacts:
-      - "*.ipa"
+      - build/OpenGlasses.ipa
