@@ -3,12 +3,22 @@ workflows:
     name: Build OpenGlasses IPA
     instance_type: mac_mini_m1
     max_build_duration: 30
+    environment:
+      xcode: 15.4
+      cocoapods: default
     scripts:
       - name: Install XcodeGen & Generate Project
         script: |
           brew install xcodegen
           chmod +x ./Scripts/generate-xcodeproj.sh
           ./Scripts/generate-xcodeproj.sh
+
+      - name: Resolve Swift Package Dependencies
+        script: |
+          xcodebuild -resolvePackageDependencies \
+            -project OpenGlasses.xcodeproj \
+            -scheme OpenGlasses
+
       - name: Build iOS App (Unsigned)
         script: |
           xcodebuild build \
@@ -16,16 +26,20 @@ workflows:
             -scheme OpenGlasses \
             -sdk iphoneos \
             -configuration Release \
+            -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             -skipMacroValidation \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             BUILD_DIR=build
+
       - name: Package into IPA
         script: |
           mkdir -p build/Payload
           cp -r build/Release-iphoneos/*.app build/Payload/
           cd build && zip -r OpenGlasses.ipa Payload
+
     artifacts:
       - build/OpenGlasses.ipa
