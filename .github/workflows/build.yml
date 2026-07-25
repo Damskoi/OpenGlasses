@@ -12,15 +12,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: Resolve Package Dependencies
+      - name: Resolve Package Dependencies with Xcode
         run: |
-          swift package resolve
+          xcodebuild -resolvePackageDependencies \
+            -scheme OpenGlasses-Package \
+            -clonedSourcePackagesDirPath .build/SourcePackages
 
       - name: Build Archive
         run: |
@@ -28,6 +33,7 @@ jobs:
             -scheme OpenGlasses-Package \
             -destination "generic/platform=iOS" \
             -archivePath build/OpenGlasses.xcarchive \
+            -clonedSourcePackagesDirPath .build/SourcePackages \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
