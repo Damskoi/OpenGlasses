@@ -21,19 +21,28 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Resolve Package Dependencies with Xcode
+      - name: Generate Xcode Project from Package
         run: |
-          xcodebuild -resolvePackageDependencies \
-            -scheme OpenGlasses-Package \
-            -clonedSourcePackagesDirPath .build/SourcePackages
+          swift package generate-xcodeproj || true
+
+      - name: Resolve Dependencies with xcodebuild
+        run: |
+          xcodebuild -resolvePackageDependencies
 
       - name: Build Archive
         run: |
           xcodebuild archive \
+            -scheme OpenGlasses \
+            -destination "generic/platform=iOS" \
+            -archivePath build/OpenGlasses.xcarchive \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            || \
+          xcodebuild archive \
             -scheme OpenGlasses-Package \
             -destination "generic/platform=iOS" \
             -archivePath build/OpenGlasses.xcarchive \
-            -clonedSourcePackagesDirPath .build/SourcePackages \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
