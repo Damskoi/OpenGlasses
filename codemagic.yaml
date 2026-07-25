@@ -12,13 +12,7 @@ workflows:
           chmod +x ./Scripts/generate-xcodeproj.sh
           ./Scripts/generate-xcodeproj.sh
 
-      - name: Resolve Swift Package Dependencies
-        script: |
-          xcodebuild -resolvePackageDependencies \
-            -project OpenGlasses.xcodeproj \
-            -scheme OpenGlasses
-
-      - name: Build iOS App (Unsigned)
+      - name: Build iOS App with Ad-Hoc / CodeSign Fallback
         script: |
           xcodebuild build \
             -project OpenGlasses.xcodeproj \
@@ -28,17 +22,17 @@ workflows:
             -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             -skipMacroValidation \
-            SWIFT_COMPILATION_MODE=wholemodule \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            CODE_SIGNING_ALLOWED=YES \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             BUILD_DIR=build
 
       - name: Package into IPA
         script: |
           mkdir -p build/Payload
-          cp -r build/Release-iphoneos/*.app build/Payload/
+          cp -r build/DerivedData/Build/Products/Release-iphoneos/*.app build/Payload/ 2>/dev/null || cp -r build/Release-iphoneos/*.app build/Payload/
           cd build && zip -r OpenGlasses.ipa Payload
 
     artifacts:
