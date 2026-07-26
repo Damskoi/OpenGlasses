@@ -34,6 +34,8 @@ workflows:
             -skipMacroValidation \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             SWIFT_STRICT_CONCURRENCY=minimal \
+            MTL_ENABLE_DEBUG_INFO=NO \
+            ENABLE_BITCODE=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
