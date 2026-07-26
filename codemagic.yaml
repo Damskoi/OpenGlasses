@@ -10,10 +10,18 @@ workflows:
       - name: Install XcodeGen
         script: |
           brew install xcodegen
+
       - name: Generate Xcode Project
         script: |
           chmod +x ./Scripts/generate-xcodeproj.sh
           ./Scripts/generate-xcodeproj.sh
+
+      - name: Resolve Swift Packages
+        script: |
+          xcodebuild -resolvePackageDependencies \
+            -project OpenGlasses.xcodeproj \
+            -scheme OpenGlasses
+
       - name: Build App Payload
         script: |
           xcodebuild build \
@@ -21,18 +29,31 @@ workflows:
             -scheme OpenGlasses \
             -sdk iphoneos \
             -configuration Release \
+            -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             -skipMacroValidation \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            BUILD_DIR=build
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
       - name: Package IPA
         script: |
           mkdir -p build/IPA/Payload
-          cp -r build/Release-iphoneos/OpenGlasses.app build/IPA/Payload/
+          
+          # Extraction du binaire de l'application principale
+          APP_PATH=$(find build/DerivedData -type d -name "OpenGlasses.app" | head -n 1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "Erreur : OpenGlasses.app introuvable dans DerivedData"
+            exit 1
+          fi
+          
+          cp -R "$APP_PATH" build/IPA/Payload/
           cd build/IPA
           zip -r OpenGlasses.ipa Payload
+
     artifacts:
       - build/IPA/*.ipa
